@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
@@ -16,19 +18,30 @@ from convexpm.portfolio.holdings import build_holdings
 from convexpm.portfolio.valuation import nav_history as build_nav_history
 from convexpm.portfolio.valuation import nav_on_date
 from convexpm.scenarios.scenario import Scenario
-from convexpm.transactions import Trade
-from convexpm.utils.dates import DateLike, to_date
+from convexpm.transactions import Trade, load_trades, save_trades
+from convexpm.utils.dates import DateLike
+
+PORTFOLIO_METADATA_FILENAME = "portfolio.json"
+PORTFOLIO_TRADES_FILENAME = "trades.parquet"
+DEFAULT_PORTFOLIOS_ROOT = Path("data/portfolios")
+PORTFOLIO_FORMAT_VERSION = 1
 
 
 @dataclass
 class Portfolio:
-    """A portfolio is trades plus a registry and normalized market data."""
+    """A portfolio is trades plus a registry and normalized market data.
+
+    Portfolio-specific state can be persisted under ``data/portfolios/<id>/``.
+    Instruments and market data remain shared stores and are not duplicated
+    inside each portfolio directory.
+    """
 
     name: str
     base_currency: str
     trades: list[Trade] = field(default_factory=list)
     registry: InstrumentRegistry | None = None
     market_data: MarketDataStore | None = None
+    _storage_dir: Path | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.base_currency = self.base_currency.upper()
@@ -37,6 +50,89 @@ class Portfolio:
             self.registry = InstrumentRegistry(auto_load=False)
         if self.market_data is None:
             self.market_data = MarketDataStore()
+
+    def add_trade(self, trade: Trade) -> None:
+        """Add a trade to the portfolio ledger.
+
+        Trade IDs are unique within a portfolio. Call :meth:`save` afterwards
+        to persist the updated ledger.
+        """
+        if any(existing.trade_id == trade.trade_id for existing in self.trades):
+            raise ValueError(f"Duplicate trade_id in portfolio: {trade.trade_id}")
+        self.trades.append(trade)
+        self.trades.sort(key=lambda item: (item.date, item.trade_id))
+
+    def save(
+        self,
+        portfolio_id: str | None = None,
+        *,
+        root: str | Path = DEFAULT_PORTFOLIOS_ROOT,
+    ) -> Path:
+        """Persist portfolio metadata and trades to a local portfolio folder.
+
+        The first save requires ``portfolio_id``. Once saved or loaded, the
+        portfolio remembers its storage directory, so subsequent calls can use
+        ``portfolio.save()``.
+        """
+        if portfolio_id is not None:
+            storage_dir = _portfolio_dir(portfolio_id, root)
+            self._storage_dir = storage_dir
+        elif self._storage_dir is not None:
+            storage_dir = self._storage_dir
+        else:
+            raise ValueError("portfolio_id is required the first time a portfolio is saved")
+
+        storage_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata = {
+            "version": PORTFOLIO_FORMAT_VERSION,
+            "name": self.name,
+            "base_currency": self.base_currency,
+        }
+        metadata_path = storage_dir / PORTFOLIO_METADATA_FILENAME
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        save_trades(self.trades, storage_dir / PORTFOLIO_TRADES_FILENAME)
+        return storage_dir
+
+    @classmethod
+    def load(
+        cls,
+        portfolio_id: str,
+        *,
+        root: str | Path = DEFAULT_PORTFOLIOS_ROOT,
+        registry: InstrumentRegistry | None = None,
+        market_data: MarketDataStore | None = None,
+    ) -> "Portfolio":
+        """Load a persisted portfolio from ``data/portfolios/<id>/``.
+
+        By default the shared ``data/instruments.parquet`` registry and
+        ``data/market_data.parquet`` store are used.
+        """
+        storage_dir = _portfolio_dir(portfolio_id, root)
+        metadata_path = storage_dir / PORTFOLIO_METADATA_FILENAME
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Portfolio metadata not found: {metadata_path}")
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        version = metadata.get("version", 1)
+        if version != PORTFOLIO_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported portfolio format version: {version}. "
+                f"Expected {PORTFOLIO_FORMAT_VERSION}."
+            )
+
+        portfolio = cls(
+            name=metadata["name"],
+            base_currency=metadata["base_currency"],
+            trades=load_trades(storage_dir / PORTFOLIO_TRADES_FILENAME),
+            registry=registry if registry is not None else InstrumentRegistry(),
+            market_data=market_data if market_data is not None else MarketDataStore(),
+        )
+        portfolio._storage_dir = storage_dir
+        return portfolio
 
     def holdings(self, date: DateLike | None = None) -> dict[str, float]:
         """Return derived holdings at ``date``."""
@@ -91,3 +187,16 @@ class Portfolio:
         if self.trades:
             candidates.append(max(trade.date for trade in self.trades))
         return max(candidates) if candidates else date.today()
+
+
+def _portfolio_dir(portfolio_id: str, root: str | Path) -> Path:
+    """Resolve a safe portfolio directory below ``root``."""
+    portfolio_id = portfolio_id.strip()
+    if (
+        not portfolio_id
+        or portfolio_id in {".", ".."}
+        or "/" in portfolio_id
+        or "\\" in portfolio_id
+    ):
+        raise ValueError("portfolio_id must be a simple folder name")
+    return Path(root) / portfolio_id

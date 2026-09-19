@@ -107,18 +107,57 @@ fund_buy = Trade(
 
 If `quantity` is missing, ConvexPM can derive it later when it has a `value_per_unit` or market data for the trade date.
 
-### Saving And Loading Trades
+### Saving And Loading A Portfolio
 
-Trades are stored locally in `data/trades.parquet`.
+Trades belong to a portfolio. ConvexPM stores each portfolio in its own local folder:
+
+```text
+data/
+└── portfolios/
+    └── personal/
+        ├── portfolio.json
+        └── trades.parquet
+```
+
+`portfolio.json` stores portfolio metadata such as the name and base currency.
+`trades.parquet` is the source-of-truth transaction ledger.
 
 ```python
-from convexpm.transactions import save_trades, load_trades
+from convexpm import Portfolio
 
-trades = [buy_repsol]
+portfolio = Portfolio(
+    name="Personal Portfolio",
+    base_currency="EUR",
+    trades=[buy_repsol],
+    registry=registry,
+    market_data=store,
+)
 
-save_trades(trades, "data/trades.parquet")
-trades = load_trades("data/trades.parquet")
+portfolio.save("personal")
 ```
+
+Later, even after restarting Python:
+
+```python
+portfolio = Portfolio.load("personal")
+print(portfolio.trades)
+print(portfolio.holdings())
+```
+
+A loaded or previously saved portfolio remembers its folder. After adding a trade,
+you can save it again without repeating the portfolio ID:
+
+```python
+portfolio.add_trade(new_trade)
+portfolio.save()
+```
+
+The instrument registry (`data/instruments.parquet`) and market-data store
+(`data/market_data.parquet`) remain shared across portfolios, so historical prices
+are not duplicated.
+
+The lower-level `save_trades()` and `load_trades()` helpers are still available
+when direct trade-file access is useful.
 
 ## Market Data
 
