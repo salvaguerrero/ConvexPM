@@ -128,6 +128,84 @@ def test_current_scenario_after_latest_market_date_uses_latest_value(tmp_path):
     assert scenario.portfolio.nav() == pytest.approx(132.0)
 
 
+
+def test_portfolio_save_and_load(tmp_path):
+    portfolio = _sample_portfolio(tmp_path)
+    portfolios_root = tmp_path / "portfolios"
+
+    saved_dir = portfolio.save("personal", root=portfolios_root)
+
+    assert saved_dir == portfolios_root / "personal"
+    assert (saved_dir / "portfolio.json").exists()
+    assert (saved_dir / "trades.parquet").exists()
+
+    loaded = Portfolio.load(
+        "personal",
+        root=portfolios_root,
+        registry=portfolio.registry,
+        market_data=portfolio.market_data,
+    )
+
+    assert loaded.name == portfolio.name
+    assert loaded.base_currency == portfolio.base_currency
+    assert [trade.to_dict() for trade in loaded.trades] == [
+        trade.to_dict() for trade in portfolio.trades
+    ]
+    assert loaded.holdings(date(2026, 1, 4)) == {"REP_MC": 10.0}
+    assert loaded.nav(date(2026, 1, 4)) == pytest.approx(120.0)
+
+
+def test_loaded_portfolio_can_add_trade_and_save_without_id(tmp_path):
+    portfolio = _sample_portfolio(tmp_path)
+    portfolios_root = tmp_path / "portfolios"
+    portfolio.save("personal", root=portfolios_root)
+
+    loaded = Portfolio.load(
+        "personal",
+        root=portfolios_root,
+        registry=portfolio.registry,
+        market_data=portfolio.market_data,
+    )
+    loaded.add_trade(
+        Trade(
+            trade_id="t2",
+            date=date(2026, 1, 2),
+            instrument_id="REP_MC",
+            side="BUY",
+            quantity=2,
+            amount=22,
+            value_per_unit=11,
+            currency="EUR",
+        )
+    )
+    loaded.save()
+
+    reloaded = Portfolio.load(
+        "personal",
+        root=portfolios_root,
+        registry=portfolio.registry,
+        market_data=portfolio.market_data,
+    )
+
+    assert [trade.trade_id for trade in reloaded.trades] == ["t1", "t2"]
+    assert reloaded.holdings(date(2026, 1, 4)) == {"REP_MC": 12.0}
+
+
+def test_add_trade_rejects_duplicate_trade_id(tmp_path):
+    portfolio = _sample_portfolio(tmp_path)
+
+    with pytest.raises(ValueError, match="Duplicate trade_id"):
+        portfolio.add_trade(
+            Trade(
+                trade_id="t1",
+                date=date(2026, 1, 2),
+                instrument_id="REP_MC",
+                side="BUY",
+                quantity=1,
+            )
+        )
+
+
 def _sample_portfolio(tmp_path):
     registry = InstrumentRegistry(tmp_path / "instruments.parquet", auto_load=False)
     registry.add(
