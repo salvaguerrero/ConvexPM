@@ -528,3 +528,35 @@ Likely V2 improvements:
 - Risk factors and scenario repricing.
 - Broker importers and reconciliation.
 - Richer metadata for sector, country, duration, strategy, and account-level reporting.
+
+
+## Realized performance vs current-allocation risk
+
+ConvexPM deliberately separates two different questions:
+
+- `portfolio.performance(start, end)` reconstructs the portfolio actually held through time.
+- `portfolio.current_risk(start, end, benchmark=...)` applies the allocation held at the analysis date to historical instrument returns over the selected lookback.
+- `portfolio.analyze(start, end, benchmark=...)` combines both views with instrument statistics, return attribution, current risk contribution, covariance/correlation matrices, weights, and calculation metadata.
+
+Example:
+
+```python
+analysis = portfolio.analyze(
+    start="2020-01-01",
+    end="2026-09-19",
+    benchmark="SP500",
+)
+
+analysis.portfolio
+analysis.instruments
+analysis.return_attribution
+analysis.risk_contribution
+analysis.correlation
+analysis.covariance
+analysis.weights
+analysis.metadata
+```
+
+A position bought recently contributes to realized return only after it enters the portfolio, while its current-risk estimate can still use a longer market history. Return contribution is expressed in portfolio percentage points; risk contribution is based on current weights and the historical covariance matrix.
+
+V1 aligns instrument histories using the intersection of valid return dates and does not silently fill missing prices.
