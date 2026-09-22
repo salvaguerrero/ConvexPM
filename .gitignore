@@ -7,3 +7,5 @@ dist/
 build/
 data/*.parquet
 data/portfolios/
+data/*.pdf
+data/*.csv
