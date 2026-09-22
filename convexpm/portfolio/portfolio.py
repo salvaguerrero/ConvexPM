@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from convexpm.analytics.current_risk import current_risk as build_current_risk
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
+from convexpm.analytics.portfolio_analysis import analyze_portfolio
 from convexpm.analytics.risk import risk_summary
+from convexpm.portfolio.allocation import market_values as build_market_values
+from convexpm.portfolio.allocation import weights as build_weights
 from convexpm.instruments import InstrumentRegistry
 from convexpm.market_data import MarketDataStore
 from convexpm.portfolio.holdings import build_holdings
@@ -163,13 +167,95 @@ class Portfolio:
             base_currency=self.base_currency,
         )
 
-    def performance(self) -> pd.Series:
-        """Return performance metrics."""
-        return performance_summary(self.nav_history(), trades=self.trades)
+    def market_values(self, date: DateLike | None = None) -> pd.DataFrame:
+        """Return current holdings valued at date with allocation weights."""
+        return build_market_values(self, date=date)
 
-    def risk(self, *, risk_free_rate: float = 0.0, benchmark_nav: pd.DataFrame | None = None) -> pd.Series:
-        """Return risk metrics."""
-        return risk_summary(self.nav_history(), risk_free_rate=risk_free_rate, benchmark_nav=benchmark_nav)
+    def weights(self, date: DateLike | None = None) -> pd.Series:
+        """Return current allocation weights indexed by instrument ID."""
+        return build_weights(self, date=date)
+
+    def performance(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+    ) -> pd.Series:
+        """Return realized performance from the holdings actually owned through time."""
+        return performance_summary(
+            self.nav_history(start=start, end=end),
+            trades=self.trades,
+        )
+
+    def current_risk(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        *,
+        benchmark: str | None = None,
+        risk_free_rate: float = 0.0,
+        periods_per_year: int = 252,
+    ):
+        """Return current-allocation risk using historical instrument returns."""
+        return build_current_risk(
+            self,
+            start=start,
+            end=end,
+            benchmark=benchmark,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
+        )
+
+    def correlation_matrix(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+    ) -> pd.DataFrame:
+        """Return correlation of current holdings over the selected market history."""
+        return self.current_risk(start=start, end=end).correlation
+
+    def risk_contribution(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+    ) -> pd.DataFrame:
+        """Return marginal, component, and percentage current risk contribution."""
+        return self.current_risk(start=start, end=end).risk_contribution
+
+    def analyze(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        *,
+        benchmark: str | None = None,
+        risk_free_rate: float = 0.0,
+        periods_per_year: int = 252,
+    ):
+        """Combine realized performance, current risk, and attribution."""
+        return analyze_portfolio(
+            self,
+            start=start,
+            end=end,
+            benchmark=benchmark,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
+        )
+
+    def risk(
+        self,
+        *,
+        risk_free_rate: float = 0.0,
+        benchmark_nav: pd.DataFrame | None = None,
+    ) -> pd.Series:
+        """Legacy realized-NAV risk metrics.
+
+        Prefer current_risk() for allocation decisions. This method remains for
+        scenario comparison code and will not be extended.
+        """
+        return risk_summary(
+            self.nav_history(),
+            risk_free_rate=risk_free_rate,
+            benchmark_nav=benchmark_nav,
+        )
 
     def exposure(self, by: str = "asset_class", date: DateLike | None = None) -> pd.DataFrame:
         """Return current exposure grouped by an instrument field or metadata key."""
