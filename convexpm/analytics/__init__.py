@@ -1,7 +1,10 @@
 """Portfolio analytics."""
 
+from convexpm.analytics.asset_returns import instrument_returns
+from convexpm.analytics.current_risk import CurrentRiskResult, current_risk, risk_contribution_from_covariance
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
+from convexpm.analytics.portfolio_analysis import PortfolioAnalysisResult, analyze_portfolio, return_attribution
 from convexpm.analytics.returns import (
     cagr,
     monthly_returns,
@@ -25,6 +28,13 @@ from convexpm.analytics.risk import (
 )
 
 __all__ = [
+    "CurrentRiskResult",
+    "PortfolioAnalysisResult",
+    "analyze_portfolio",
+    "current_risk",
+    "instrument_returns",
+    "return_attribution",
+    "risk_contribution_from_covariance",
     "annualized_volatility",
     "beta",
     "cagr",
