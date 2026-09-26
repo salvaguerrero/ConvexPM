@@ -13,6 +13,7 @@ import pandas as pd
 from convexpm.analytics.current_risk import current_risk as build_current_risk
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
+from convexpm.analytics.views import performance_view as build_performance_view, risk_view as build_risk_view
 from convexpm.analytics.portfolio_analysis import analyze_portfolio
 from convexpm.analytics.risk import risk_summary
 from convexpm.portfolio.allocation import market_values as build_market_values
@@ -252,6 +253,14 @@ class Portfolio:
             trades=self.trades,
         )
 
+    def performance_view(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+    ):
+        """Return the simple realized-performance view used by the product/REPL."""
+        return build_performance_view(self, start=start, end=end)
+
     def current_risk(
         self,
         start: DateLike | None = None,
@@ -268,6 +277,21 @@ class Portfolio:
             end=end,
             benchmark=benchmark,
             risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
+        )
+
+    def risk_view(
+        self,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        *,
+        periods_per_year: int = 252,
+    ):
+        """Return the simple current-allocation risk view used by the product/REPL."""
+        return build_risk_view(
+            self,
+            start=start,
+            end=end,
             periods_per_year=periods_per_year,
         )
 

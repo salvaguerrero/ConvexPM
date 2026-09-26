@@ -5,6 +5,7 @@ from convexpm.analytics.current_risk import CurrentRiskResult, current_risk, ris
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
 from convexpm.analytics.portfolio_analysis import PortfolioAnalysisResult, analyze_portfolio, return_attribution
+from convexpm.analytics.views import PerformanceViewResult, RiskViewResult, performance_view, risk_view
 from convexpm.analytics.returns import (
     cagr,
     monthly_returns,
@@ -28,6 +29,10 @@ from convexpm.analytics.risk import (
 )
 
 __all__ = [
+    "PerformanceViewResult",
+    "RiskViewResult",
+    "performance_view",
+    "risk_view",
     "CurrentRiskResult",
     "PortfolioAnalysisResult",
     "analyze_portfolio",

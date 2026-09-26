@@ -594,3 +594,28 @@ analysis.metadata
 A position bought recently contributes to realized return only after it enters the portfolio, while its current-risk estimate can still use a longer market history. Return contribution is expressed in portfolio percentage points; risk contribution is based on current weights and the historical covariance matrix.
 
 V1 aligns instrument histories using the intersection of valid return dates and does not silently fill missing prices.
+
+## Simple Performance and Risk Views
+
+The higher-level view API is intentionally smaller than the full analytics API and is convenient in a REPL or future UI:
+
+```python
+performance = portfolio.performance_view(start="2020-01-01")
+performance.summary
+performance.assets
+performance.yearly_return_contribution
+performance.cumulative_return
+
+risk = portfolio.risk_view(start="2020-01-01")
+risk.summary
+risk.assets
+risk.yearly_risk_contribution
+risk.yearly_portfolio_volatility
+risk.correlation
+```
+
+`performance.yearly_return_contribution` uses assets as rows and calendar years as columns. Asset rows are chain-linked percentage-point return contributions and the final `Portfolio Return` row is the total investment return for each year.
+
+`risk.yearly_risk_contribution` uses the same orientation. Each year uses the portfolio allocation held at that year-end and an expanding historical lookback beginning at `start`. Asset rows are percentage contribution to portfolio volatility; the final `Portfolio Volatility` row is the total annualized volatility.
+
+The performance view reconstructs returns from historical holdings and instrument returns, so the mechanical effect of adding or removing capital is not counted as investment performance. A first-class cash/contribution ledger is still needed before cash balances and contribution reporting are fully modeled.
