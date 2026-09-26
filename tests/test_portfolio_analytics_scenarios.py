@@ -29,6 +29,108 @@ def test_nav_history(tmp_path):
     assert portfolio.nav(date(2026, 1, 4)) == pytest.approx(120.0)
 
 
+def test_portfolio_terminal_summary_stats_and_plot(tmp_path):
+    portfolio = _sample_portfolio(tmp_path)
+
+    summary = portfolio.summary()
+
+    assert summary.loc[0, "instrument_id"] == "REP_MC"
+    assert summary.loc[0, "market_value"] == pytest.approx(120.0)
+    assert summary.loc[0, "weight"] == pytest.approx(1.0)
+    assert portfolio.stats["total_return"] == pytest.approx(0.2)
+    assert "2026" in portfolio.stats().columns
+    assert "NAV: 120.00 EUR" in repr(portfolio)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    assert portfolio.plot(show=False).get_title() == "Test NAV"
+    assert "Test NAV" in repr(portfolio.plot_text(width=20, height=5))
+    assert "Test NAV" in repr(portfolio.plot(style="terminal", width=20, height=5))
+
+
+def test_portfolio_stats_skip_unpriced_holdings(tmp_path):
+    portfolio = _sample_portfolio(tmp_path)
+    portfolio.add_trade(
+        Trade(
+            trade_id="unpriced",
+            date=date(2026, 1, 1),
+            instrument_id="MISSING_PRICE",
+            side="BUY",
+            quantity=5,
+        )
+    )
+
+    summary = portfolio.summary()
+    stats = portfolio.stats(12, freq="M")
+
+    assert "missing_price" in summary["status"].tolist()
+    assert "2026-01" in stats.columns
+    assert portfolio.stats["last_nav"] == pytest.approx(120.0)
+
+
+def test_portfolio_uses_fx_market_data_for_base_currency_valuation(tmp_path):
+    registry = InstrumentRegistry(tmp_path / "instruments.parquet", auto_load=False)
+    registry.add(
+        Instrument(
+            instrument_id="AAPL",
+            name="Apple",
+            instrument_type="equity",
+            asset_class="equity",
+            currency="USD",
+            data_source="fixture",
+        )
+    )
+    registry.add(
+        Instrument(
+            instrument_id="USDEUR",
+            name="USD/EUR",
+            instrument_type="fx",
+            asset_class="fx",
+            currency="EUR",
+            data_source="fixture",
+        )
+    )
+    store = MarketDataStore(tmp_path / "market.parquet")
+    store.upsert(
+        pd.DataFrame(
+            {
+                "date": ["2026-01-01", "2026-01-01"],
+                "instrument_id": ["AAPL", "USDEUR"],
+                "value": [100.0, 0.9],
+                "currency": ["USD", "EUR"],
+                "value_type": ["close", "fx"],
+                "source": ["fixture", "fixture"],
+            }
+        )
+    )
+    portfolio = Portfolio(
+        name="FX",
+        base_currency="EUR",
+        trades=[
+            Trade(
+                trade_id="aapl",
+                date=date(2026, 1, 1),
+                instrument_id="AAPL",
+                side="BUY",
+                quantity=2,
+            )
+        ],
+        registry=registry,
+        market_data=store,
+    )
+
+    summary = portfolio.summary(date(2026, 1, 1))
+    market_values = portfolio.market_values(date(2026, 1, 1))
+
+    assert portfolio.nav(date(2026, 1, 1)) == pytest.approx(180.0)
+    assert summary.loc[0, "local_market_value"] == pytest.approx(200.0)
+    assert summary.loc[0, "fx_pair"] == "USDEUR"
+    assert summary.loc[0, "fx_rate"] == pytest.approx(0.9)
+    assert summary.loc[0, "market_value"] == pytest.approx(180.0)
+    assert market_values.loc[0, "market_value"] == pytest.approx(180.0)
+
+
 def test_total_return_and_cagr():
     nav = pd.DataFrame(
         {

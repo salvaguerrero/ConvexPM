@@ -246,6 +246,40 @@ store.upsert(market_df)
 
 The parser assumes EUR for Renta 4 funds in V1.
 
+## Broker Imports
+
+IBKR transaction-history CSV exports can be imported into normalized trades plus
+the full cash-transaction ledger:
+
+```python
+from convexpm import IBKRTransactionParser
+
+ibkr_import = IBKRTransactionParser().parse("data/ibkr/U24532596.TRANSACTIONS.1Y.csv")
+trades = ibkr_import.trades
+cash_transactions = ibkr_import.cash_transactions
+```
+
+For trades, `amount` is gross exposure in the statement base currency and
+`fees` includes broker commissions plus explicit transaction-fee rows. The
+original broker fields remain in `trade.metadata`.
+
+Renta 4 folders can include fund NAV CSVs, a fund-operation `.xls`, and
+Morningstar report PDFs:
+
+```python
+from convexpm import Renta4ImportParser
+
+r4_import = Renta4ImportParser().parse_directory("data/r4")
+
+registry.add_many(r4_import.instruments)
+registry.save()
+store.upsert(r4_import.market_data)
+```
+
+The Renta 4 importer maps fund operations to ISINs when the fund appears in a
+NAV export. If a fund has transactions but no NAV file, it receives a generated
+`R4_...` instrument ID.
+
 ## Build A Portfolio
 
 A portfolio combines trades, instruments, and market data.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(slots=True)
@@ -71,3 +71,69 @@ class Instrument:
             data_symbol=data.get("data_symbol"),
             metadata=dict(data.get("metadata") or {}),
         )
+
+    @classmethod
+    def from_yahoo(
+        cls,
+        symbol: str,
+        *,
+        instrument_id: str | None = None,
+        ticker_factory: Callable[[str], Any] | None = None,
+    ) -> "Instrument":
+        """Build an instrument from Yahoo Finance metadata."""
+        data_symbol = symbol.strip()
+        if not data_symbol:
+            raise ValueError("symbol is required")
+
+        ticker = ticker_factory(data_symbol) if ticker_factory is not None else _yahoo_ticker(data_symbol)
+        info = ticker.get_info() if hasattr(ticker, "get_info") else getattr(ticker, "info", {})
+        if not isinstance(info, dict):
+            info = {}
+
+        quote_type = str(info.get("quoteType") or "equity").lower()
+        instrument_type = _yahoo_instrument_type(quote_type)
+        name = info.get("longName") or info.get("shortName") or data_symbol
+        currency = info.get("currency") or "USD"
+        resolved_id = instrument_id or info.get("symbol") or data_symbol
+        metadata = {
+            "source": "yahoo",
+            "yahoo_symbol": data_symbol,
+            "quote_type": info.get("quoteType"),
+            "exchange": info.get("exchange"),
+            "market": info.get("market"),
+            "country": info.get("country"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+        }
+        metadata = {key: value for key, value in metadata.items() if value is not None}
+
+        return cls(
+            instrument_id=str(resolved_id),
+            name=str(name),
+            instrument_type=instrument_type,
+            asset_class=instrument_type,
+            currency=str(currency),
+            data_source="yahoo",
+            data_symbol=data_symbol,
+            metadata=metadata,
+        )
+
+
+def _yahoo_ticker(symbol: str) -> Any:
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise ImportError("Install yfinance to build instruments from Yahoo") from exc
+    return yf.Ticker(symbol)
+
+
+def _yahoo_instrument_type(quote_type: str) -> str:
+    mapping = {
+        "etf": "etf",
+        "equity": "equity",
+        "mutualfund": "fund",
+        "index": "index",
+        "currency": "currency",
+        "cryptocurrency": "crypto",
+    }
+    return mapping.get(quote_type.replace("_", "").replace(" ", ""), quote_type or "equity")

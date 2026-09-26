@@ -12,8 +12,11 @@ authors = [{ name = "ConvexPM Contributors" }]
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.2",
+    "plotext>=5.3",
     "pyarrow>=15",
+    "pypdf>=6.0",
     "yfinance>=0.2",
+    "xlrd>=2.0",
 ]
 
 [project.optional-dependencies]

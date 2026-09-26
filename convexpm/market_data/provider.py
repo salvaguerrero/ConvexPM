@@ -48,8 +48,14 @@ class MarketDataUpdater:
         *,
         start: date | None = None,
         end: date | None = None,
+        force: bool = False,
     ) -> pd.DataFrame:
-        """Update one instrument and return the rows that were fetched."""
+        """Update one instrument and return the rows that were fetched.
+
+        By default, only rows after the latest stored date are fetched. Set
+        ``force=True`` to honor ``start`` exactly and backfill older history.
+        Existing rows are safely overwritten by ``MarketDataStore.upsert``.
+        """
         instrument = self.registry.get(instrument_id)
         provider = self.providers.get(instrument.data_source)
         if provider is None:
@@ -57,7 +63,7 @@ class MarketDataUpdater:
 
         latest = self.store.latest(instrument_id)
         fetch_start = start
-        if latest is not None:
+        if latest is not None and not force:
             latest_date = to_date(latest["date"])
             missing_start = next_day(latest_date)
             fetch_start = max(fetch_start, missing_start) if fetch_start else missing_start

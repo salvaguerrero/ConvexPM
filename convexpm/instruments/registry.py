@@ -42,6 +42,22 @@ class InstrumentRegistry:
         for instrument in instruments:
             self.add(instrument, replace=replace)
 
+    def update(self, instruments: Iterable[Instrument], *, replace: bool = True) -> None:
+        """Merge multiple instruments into the registry."""
+        self.add_many(instruments, replace=replace)
+
+    def add_yahoo(
+        self,
+        symbol: str,
+        *,
+        instrument_id: str | None = None,
+        replace: bool = True,
+    ) -> Instrument:
+        """Create an instrument from Yahoo metadata, add it, and return it."""
+        instrument = Instrument.from_yahoo(symbol, instrument_id=instrument_id)
+        self.add(instrument, replace=replace)
+        return instrument
+
     def get(self, instrument_id: str) -> Instrument:
         """Return an instrument by ID."""
         try:
@@ -49,15 +65,74 @@ class InstrumentRegistry:
         except KeyError as exc:
             raise KeyError(f"Unknown instrument_id: {instrument_id}") from exc
 
+    def remove(self, instrument_id: str, *, missing_ok: bool = False) -> Instrument | None:
+        """Remove an instrument from the registry and return it.
+
+        Call :meth:`save` afterwards to persist the change.
+        """
+        try:
+            return self._instruments.pop(instrument_id)
+        except KeyError:
+            if missing_ok:
+                return None
+            raise KeyError(f"Unknown instrument_id: {instrument_id}") from None
+
     def all(self) -> list[Instrument]:
         """Return all registered instruments sorted by ID."""
         return [self._instruments[key] for key in sorted(self._instruments)]
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return registered instruments as a display-friendly DataFrame."""
+        rows = []
+        for instrument in self.all():
+            metadata = instrument.metadata or {}
+            rows.append(
+                {
+                    "instrument_id": instrument.instrument_id,
+                    "name": instrument.name,
+                    "asset_class": instrument.asset_class,
+                    "instrument_type": instrument.instrument_type,
+                    "currency": instrument.currency,
+                    "ticker": instrument.data_symbol,
+                    "source": instrument.data_source,
+                    "country": metadata.get("country"),
+                    "sector": metadata.get("sector"),
+                    "exchange": metadata.get("yahoo_exchange") or metadata.get("exchange"),
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "instrument_id",
+                "name",
+                "asset_class",
+                "instrument_type",
+                "currency",
+                "ticker",
+                "source",
+                "country",
+                "sector",
+                "exchange",
+            ],
+        )
 
     def __contains__(self, instrument_id: object) -> bool:
         return instrument_id in self._instruments
 
     def __len__(self) -> int:
         return len(self._instruments)
+
+    def __repr__(self) -> str:
+        df = self.to_dataframe()
+        if df.empty:
+            return "InstrumentRegistry(empty)"
+        return df.to_string(index=False)
+
+    def _repr_html_(self) -> str:
+        df = self.to_dataframe()
+        if df.empty:
+            return "<p>InstrumentRegistry(empty)</p>"
+        return df._repr_html_()
 
     def save(self) -> None:
         """Persist instruments to Parquet."""
