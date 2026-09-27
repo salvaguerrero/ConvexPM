@@ -105,6 +105,7 @@ class Renta4ImportParser:
             )
             all_trades.extend(trades)
             raw_frames.append(raw)
+            _record_transaction_aliases(raw, instruments_by_id)
             for instrument in _fallback_instruments_from_transactions(raw, known_ids=set(instruments_by_id)):
                 instruments_by_id[instrument.instrument_id] = instrument
 
@@ -165,6 +166,7 @@ class Renta4ImportParser:
             if current_fund_name is None:
                 continue
             instrument_id = _resolve_instrument_id(current_fund_name, instrument_name_map, instruments)
+            fallback_instrument_id = _slug_id(current_fund_name)
             operation_type = _clean_text(row.iloc[1])
             gross_amount = _parse_number(row.iloc[4])
             commission = _parse_number(row.iloc[5]) or 0.0
@@ -178,6 +180,7 @@ class Renta4ImportParser:
                     "date": pd.Timestamp(trade_date),
                     "fund_name": current_fund_name,
                     "instrument_id": instrument_id,
+                    "fallback_instrument_id": fallback_instrument_id,
                     "operation_type": operation_type,
                     "side": side,
                     "quantity": quantity,
@@ -235,9 +238,13 @@ def _renta4_trade_from_row(row: pd.Series) -> Trade:
     amount = abs(float(row["gross_amount"])) if pd.notna(row.get("gross_amount")) else None
     fees = abs(float(row.get("commission") or 0.0)) + abs(float(row.get("withholding") or 0.0))
     value_per_unit = amount / quantity if amount is not None and quantity else None
+    fallback_instrument_id = row.get("fallback_instrument_id")
+    if not isinstance(fallback_instrument_id, str) or not fallback_instrument_id.strip():
+        fallback_instrument_id = _slug_id(str(row["fund_name"]))
     metadata = {
         "source": "renta4",
         "fund_name": row["fund_name"],
+        "fallback_instrument_id": fallback_instrument_id,
         "operation_type": row["operation_type"],
         "gross_dividend": _none_if_na(row.get("gross_dividend")),
         "gross_amount": _none_if_na(row.get("gross_amount")),
@@ -253,7 +260,7 @@ def _renta4_trade_from_row(row: pd.Series) -> Trade:
             "renta4",
             [
                 str(row["date"].date()),
-                str(row["instrument_id"]),
+                fallback_instrument_id,
                 str(row["side"]),
                 str(row.get("operation_type")),
                 _stable_number(quantity),
@@ -342,6 +349,37 @@ def _fallback_instruments_from_transactions(raw: pd.DataFrame, *, known_ids: set
             )
         )
     return instruments
+
+
+def _record_transaction_aliases(raw: pd.DataFrame, instruments_by_id: dict[str, Instrument]) -> None:
+    if raw.empty or "fallback_instrument_id" not in raw:
+        return
+    for instrument_id, rows in raw.groupby("instrument_id", sort=False):
+        if instrument_id not in instruments_by_id:
+            continue
+        instrument = instruments_by_id[instrument_id]
+        fallback_ids = {
+            str(value)
+            for value in rows["fallback_instrument_id"].dropna().tolist()
+            if str(value) and str(value) != instrument_id
+        }
+        if not fallback_ids:
+            continue
+        transaction_names = {
+            str(value)
+            for value in rows["fund_name"].dropna().tolist()
+            if str(value).strip()
+        }
+        _extend_metadata_list(instrument.metadata, "replaces_instrument_ids", fallback_ids)
+        _extend_metadata_list(instrument.metadata, "renta4_transaction_names", transaction_names)
+
+
+def _extend_metadata_list(metadata: dict[str, Any], key: str, values: Iterable[str]) -> None:
+    existing = metadata.get(key)
+    items = set(existing if isinstance(existing, list) else [])
+    items.update(value for value in values if value)
+    if items:
+        metadata[key] = sorted(items)
 
 
 def _fund_currency(fund_name: str) -> str:

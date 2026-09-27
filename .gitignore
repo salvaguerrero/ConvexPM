@@ -14,3 +14,4 @@ data/**/*.xls
 data/**/*.xlsx
 !data/.gitkeep
 scripts/explore_my_portfolio.py
+scripts/explore_my_portfolio_2.py

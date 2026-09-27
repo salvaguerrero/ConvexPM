@@ -4,7 +4,8 @@ import pandas as pd
 import pytest
 
 from convexpm.importers import IBKRTransactionParser, Renta4ImportParser
-from convexpm.importers.renta4 import _fallback_instruments_from_transactions
+from convexpm.importers.renta4 import _fallback_instruments_from_transactions, _record_transaction_aliases
+from convexpm.instruments import Instrument
 
 
 def test_ibkr_parser_groups_trades_and_allocates_transaction_fees():
@@ -93,6 +94,74 @@ def test_renta4_transaction_parser_maps_fund_names_to_isin_and_costs():
     assert trades[0].fees == pytest.approx(1.5)
     assert trades[1].side == "SELL"
     assert trades[1].fees == pytest.approx(0.91)
+
+
+def test_renta4_trade_id_survives_later_isin_resolution():
+    df = pd.DataFrame(
+        [
+            [
+                "Fecha",
+                "Tipo operación",
+                "Participaciones",
+                "Importe bruto Div.",
+                "Importe bruto",
+                "Comisión.",
+                "Retención",
+                "Importe NETO",
+                "Estado",
+            ],
+            ['BNP USD MONEY MARKET "C" (USD) ACC', None, None, None, None, None, None, None, None],
+            ["27/09/2022", "SUSCRIPCIÓN NUEVA", 3.916, 900, 900, 0, 0, 900, "Validada"],
+        ]
+    )
+    parser = Renta4ImportParser()
+
+    fallback_trades, fallback_raw = parser.parse_transactions_dataframe(df)
+    isin_trades, isin_raw = parser.parse_transactions_dataframe(
+        df,
+        instruments=[
+            Instrument(
+                instrument_id="LU0012186622",
+                name="Bnp Paribas Usd Money Market Classic C",
+                instrument_type="fund",
+                asset_class="fund",
+                currency="EUR",
+                data_source="renta4",
+            )
+        ],
+    )
+
+    assert fallback_raw.loc[0, "instrument_id"] == "R4_BNP_USD_MONEY_MARKET_C_USD_ACC"
+    assert isin_raw.loc[0, "instrument_id"] == "LU0012186622"
+    assert fallback_raw.loc[0, "fallback_instrument_id"] == "R4_BNP_USD_MONEY_MARKET_C_USD_ACC"
+    assert isin_raw.loc[0, "fallback_instrument_id"] == "R4_BNP_USD_MONEY_MARKET_C_USD_ACC"
+    assert fallback_trades[0].trade_id == isin_trades[0].trade_id
+    assert isin_trades[0].metadata["fallback_instrument_id"] == "R4_BNP_USD_MONEY_MARKET_C_USD_ACC"
+
+
+def test_renta4_transaction_aliases_mark_canonical_instrument_replacements():
+    raw = pd.DataFrame(
+        [
+            {
+                "instrument_id": "LU0012186622",
+                "fallback_instrument_id": "R4_BNP_USD_MONEY_MARKET_C_USD_ACC",
+                "fund_name": 'BNP USD MONEY MARKET "C" (USD) ACC',
+            }
+        ]
+    )
+    instrument = Instrument(
+        instrument_id="LU0012186622",
+        name="Bnp Paribas Usd Money Market Classic C",
+        instrument_type="fund",
+        asset_class="fund",
+        currency="EUR",
+        data_source="renta4",
+    )
+
+    _record_transaction_aliases(raw, {"LU0012186622": instrument})
+
+    assert instrument.metadata["replaces_instrument_ids"] == ["R4_BNP_USD_MONEY_MARKET_C_USD_ACC"]
+    assert instrument.metadata["renta4_transaction_names"] == ['BNP USD MONEY MARKET "C" (USD) ACC']
 
 
 def test_renta4_fallback_instruments_keep_transaction_fund_names():

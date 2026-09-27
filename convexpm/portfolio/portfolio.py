@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -33,6 +35,7 @@ PORTFOLIO_METADATA_FILENAME = "portfolio.json"
 PORTFOLIO_TRADES_FILENAME = "trades.parquet"
 DEFAULT_PORTFOLIOS_ROOT = Path("data/portfolios")
 PORTFOLIO_FORMAT_VERSION = 1
+ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
 
 
 @dataclass
@@ -85,18 +88,20 @@ class Portfolio:
         if duplicate not in {"skip", "raise"}:
             raise ValueError("duplicate must be 'skip' or 'raise'")
 
-        existing_ids = {trade.trade_id for trade in self.trades}
-        existing_keys = {_trade_identity_key(trade) for trade in self.trades}
+        existing_by_id = {trade.trade_id: trade for trade in self.trades}
+        existing_by_key = {_trade_identity_key(trade): trade for trade in self.trades}
         inserted = 0
         for trade in trades:
             trade_key = _trade_identity_key(trade)
-            if trade.trade_id in existing_ids or trade_key in existing_keys:
+            existing = existing_by_id.get(trade.trade_id) or existing_by_key.get(trade_key)
+            if existing is not None:
                 if duplicate == "raise":
                     raise ValueError(f"Duplicate trade_id in portfolio: {trade.trade_id}")
+                _upgrade_duplicate_trade(existing, trade)
                 continue
             self.trades.append(trade)
-            existing_ids.add(trade.trade_id)
-            existing_keys.add(trade_key)
+            existing_by_id[trade.trade_id] = trade
+            existing_by_key[trade_key] = trade
             inserted += 1
         self.trades.sort(key=lambda item: (item.date, item.trade_id))
         return inserted
@@ -112,14 +117,15 @@ class Portfolio:
         overlapping broker exports that produced different historical IDs.
         """
         unique: list[Trade] = []
-        seen: set[tuple[object, ...]] = set()
+        seen: dict[tuple[object, ...], Trade] = {}
         removed = 0
         for trade in self.trades:
             key = _trade_identity_key(trade)
             if key in seen:
+                _upgrade_duplicate_trade(seen[key], trade)
                 removed += 1
                 continue
-            seen.add(key)
+            seen[key] = trade
             unique.append(trade)
         if removed:
             self.trades = TradeLedger(unique, registry=self.registry)
@@ -619,7 +625,7 @@ def _trade_identity_key(trade: Trade) -> tuple[object, ...]:
         source,
         trade.date,
         trade.account,
-        trade.instrument_id,
+        _trade_instrument_identity(trade, source),
         trade.side,
         trade.currency,
         broker_type,
@@ -627,6 +633,54 @@ def _trade_identity_key(trade: Trade) -> tuple[object, ...]:
         _rounded_trade_number(trade.amount),
         _rounded_trade_number(trade.value_per_unit),
         _rounded_trade_number(trade.fees),
+    )
+
+
+def _trade_instrument_identity(trade: Trade, source: str) -> str:
+    if source == "renta4":
+        fallback_id = trade.metadata.get("fallback_instrument_id")
+        if isinstance(fallback_id, str) and fallback_id.strip():
+            return fallback_id.strip().upper()
+        fund_name = trade.metadata.get("fund_name")
+        if isinstance(fund_name, str) and fund_name.strip():
+            return _renta4_fallback_id(fund_name)
+    return trade.instrument_id
+
+
+def _upgrade_duplicate_trade(existing: Trade, incoming: Trade) -> None:
+    if not _is_renta4_canonical_upgrade(existing, incoming):
+        return
+    previous_ids = list(existing.metadata.get("previous_instrument_ids") or [])
+    if existing.instrument_id not in previous_ids:
+        previous_ids.append(existing.instrument_id)
+    existing.instrument_id = incoming.instrument_id
+    existing.metadata["previous_instrument_ids"] = previous_ids
+    existing.metadata["upgraded_instrument_id_from"] = "renta4_isin_resolution"
+
+
+def _is_renta4_canonical_upgrade(existing: Trade, incoming: Trade) -> bool:
+    existing_source = str(existing.metadata.get("source") or (existing.tags[0] if existing.tags else "")).lower()
+    incoming_source = str(incoming.metadata.get("source") or (incoming.tags[0] if incoming.tags else "")).lower()
+    return (
+        existing_source == "renta4"
+        and incoming_source == "renta4"
+        and existing.instrument_id.startswith("R4_")
+        and bool(ISIN_RE.match(incoming.instrument_id))
+        and _trade_instrument_identity(existing, existing_source) == _trade_instrument_identity(incoming, incoming_source)
+    )
+
+
+def _renta4_fallback_id(value: str) -> str:
+    normalized = _strip_accents(value).upper()
+    slug = re.sub(r"[^A-Z0-9]+", "_", normalized).strip("_")
+    return f"R4_{slug}"
+
+
+def _strip_accents(value: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", value)
+        if not unicodedata.combining(char)
     )
 
 

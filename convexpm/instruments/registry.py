@@ -33,6 +33,10 @@ class InstrumentRegistry:
 
     def add(self, instrument: Instrument, *, replace: bool = True) -> None:
         """Add an instrument to the registry."""
+        if replace:
+            for replaced_id in _replaced_instrument_ids(instrument):
+                if replaced_id != instrument.instrument_id:
+                    self._instruments.pop(replaced_id, None)
         if not replace and instrument.instrument_id in self._instruments:
             raise KeyError(f"Instrument already exists: {instrument.instrument_id}")
         self._instruments[instrument.instrument_id] = instrument
@@ -167,3 +171,10 @@ class InstrumentRegistry:
             )
             instruments[instrument.instrument_id] = instrument
         self._instruments = instruments
+
+
+def _replaced_instrument_ids(instrument: Instrument) -> list[str]:
+    raw = instrument.metadata.get("replaces_instrument_ids")
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]

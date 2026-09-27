@@ -85,6 +85,38 @@ def test_registry_update_alias(tmp_path):
     assert registry.get("REP_MC").name == "Repsol"
 
 
+def test_registry_update_removes_replaced_instrument_ids(tmp_path):
+    registry = InstrumentRegistry(tmp_path / "instruments.parquet", auto_load=False)
+    registry.add(
+        Instrument(
+            instrument_id="R4_BNP_USD_MONEY_MARKET_C_USD_ACC",
+            name='BNP USD MONEY MARKET "C" (USD) ACC',
+            instrument_type="fund",
+            asset_class="fund",
+            currency="USD",
+            data_source="renta4",
+            metadata={"created_from": "renta4_trade"},
+        )
+    )
+
+    registry.update(
+        [
+            Instrument(
+                instrument_id="LU0012186622",
+                name="Bnp Paribas Usd Money Market Classic C",
+                instrument_type="fund",
+                asset_class="fund",
+                currency="EUR",
+                data_source="renta4",
+                metadata={"replaces_instrument_ids": ["R4_BNP_USD_MONEY_MARKET_C_USD_ACC"]},
+            )
+        ]
+    )
+
+    assert "R4_BNP_USD_MONEY_MARKET_C_USD_ACC" not in registry
+    assert registry.get("LU0012186622").name == "Bnp Paribas Usd Money Market Classic C"
+
+
 def test_registry_displays_as_dataframe(tmp_path):
     registry = InstrumentRegistry(tmp_path / "instruments.parquet", auto_load=False)
     registry.add(
@@ -199,6 +231,51 @@ def test_portfolio_add_trades_skips_same_trade_with_different_id():
 
     assert portfolio.add_trades([same_trade]) == 0
     assert len(portfolio.trades) == 1
+
+
+def test_portfolio_add_trades_upgrades_renta4_generated_id_to_isin():
+    existing = Trade(
+        trade_id="old-id",
+        date=date(2022, 9, 27),
+        instrument_id="R4_BNP_USD_MONEY_MARKET_C_USD_ACC",
+        side="BUY",
+        quantity=3.916,
+        amount=900,
+        value_per_unit=229.82635342,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4"],
+        metadata={
+            "source": "renta4",
+            "fund_name": 'BNP USD MONEY MARKET "C" (USD) ACC',
+            "operation_type": "SUSCRIPCIÓN NUEVA",
+        },
+    )
+    incoming = Trade(
+        trade_id="new-id",
+        date=date(2022, 9, 27),
+        instrument_id="LU0012186622",
+        side="BUY",
+        quantity=3.916,
+        amount=900,
+        value_per_unit=229.82635342,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4"],
+        metadata={
+            "source": "renta4",
+            "fund_name": 'BNP USD MONEY MARKET "C" (USD) ACC',
+            "fallback_instrument_id": "R4_BNP_USD_MONEY_MARKET_C_USD_ACC",
+            "operation_type": "SUSCRIPCIÓN NUEVA",
+        },
+    )
+    portfolio = Portfolio(name="Main", base_currency="EUR", trades=[existing])
+
+    assert portfolio.add_trades([incoming]) == 0
+    assert len(portfolio.trades) == 1
+    upgraded = list(portfolio.trades)[0]
+    assert upgraded.instrument_id == "LU0012186622"
+    assert upgraded.metadata["previous_instrument_ids"] == ["R4_BNP_USD_MONEY_MARKET_C_USD_ACC"]
 
 
 def test_portfolio_deduplicate_trades_removes_existing_duplicates():
