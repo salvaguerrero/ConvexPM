@@ -187,7 +187,11 @@ def money_weighted_return(nav_history: pd.DataFrame, trades: Iterable[Trade]) ->
     if df.empty:
         return None
     flows: list[tuple[date | pd.Timestamp, float]] = []
-    for trade in trades:
+    trade_list = list(trades)
+    settlement_parent_ids = cash_settlement_parent_ids(trade_list)
+    for trade in trade_list:
+        if not is_external_capital_flow(trade, settlement_parent_ids=settlement_parent_ids):
+            continue
         amount = _trade_amount(trade)
         if amount is None:
             continue
@@ -203,7 +207,11 @@ def money_weighted_return(nav_history: pd.DataFrame, trades: Iterable[Trade]) ->
 
 def _daily_external_flows(trades: Iterable[Trade]) -> dict[pd.Timestamp, float]:
     flows: dict[pd.Timestamp, float] = {}
-    for trade in trades:
+    trade_list = list(trades)
+    settlement_parent_ids = cash_settlement_parent_ids(trade_list)
+    for trade in trade_list:
+        if not is_external_capital_flow(trade, settlement_parent_ids=settlement_parent_ids):
+            continue
         amount = _trade_amount(trade)
         if amount is None:
             continue
@@ -211,6 +219,44 @@ def _daily_external_flows(trades: Iterable[Trade]) -> dict[pd.Timestamp, float]:
         timestamp = pd.Timestamp(trade.date).normalize()
         flows[timestamp] = flows.get(timestamp, 0.0) + signed_flow
     return flows
+
+
+def cash_settlement_parent_ids(trades: Iterable[Trade]) -> set[str]:
+    """Return trade IDs that have generated cash settlement legs."""
+    parent_ids: set[str] = set()
+    for trade in trades:
+        if str(trade.metadata.get("source") or "") != "cash_ledger":
+            continue
+        parent_id = trade.metadata.get("parent_trade_id")
+        if isinstance(parent_id, str) and parent_id:
+            parent_ids.add(parent_id)
+    return parent_ids
+
+
+def is_external_capital_flow(
+    trade: Trade,
+    *,
+    settlement_parent_ids: set[str] | None = None,
+) -> bool:
+    """Return whether ``trade`` represents money entering/leaving the portfolio.
+
+    Funded account settlement, dividends, taxes, and FX cash adjustments are
+    internal portfolio activity. Cash deposits/withdrawals and in-kind
+    contributions remain external capital flows.
+    """
+    source = str(trade.metadata.get("source") or (trade.tags[0] if trade.tags else "")).lower()
+    if source == "cash_ledger":
+        return False
+    if settlement_parent_ids and trade.trade_id in settlement_parent_ids:
+        return False
+    if source == "ibkr_cash":
+        broker_type = str(trade.metadata.get("broker_transaction_type") or "").strip().lower()
+        return broker_type in {"deposit", "withdrawal"}
+    if source == "renta4":
+        operation_type = str(trade.metadata.get("operation_type") or "").strip().lower()
+        if operation_type.startswith(("t. entrada", "t. salida")):
+            return False
+    return True
 
 
 def _trade_amount(trade: Trade) -> float | None:

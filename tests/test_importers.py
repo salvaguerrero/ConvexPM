@@ -4,7 +4,11 @@ import pandas as pd
 import pytest
 
 from convexpm.importers import IBKRTransactionParser, Renta4ImportParser
-from convexpm.importers.renta4 import _fallback_instruments_from_transactions, _record_transaction_aliases
+from convexpm.importers.renta4 import (
+    _fallback_instruments_from_transactions,
+    _record_transaction_aliases,
+    _sync_market_data_currencies,
+)
 from convexpm.instruments import Instrument
 
 
@@ -17,6 +21,7 @@ Transaction History,Data,2026-04-16,U***32596,REPSOL SA,Buy,REP,18.0,20.65,EUR,-
 Transaction History,Data,2026-04-16,U***32596,Spanish Daily Trade Charge Tax REP 20,Transaction Fee,REP,20.0,-,-,-0.83,-,-0.83
 Transaction History,Data,2026-04-16,U***32596,REPSOL SA,Buy,REP,2.0,20.65,EUR,-41.3,-3.0,-44.3
 Transaction History,Data,2026-07-08,U***32596,REP Cash Dividend,Dividend,REP,-,-,-,16.53,-,16.53
+Transaction History,Data,2026-07-09,U***32596,Cash Deposit,Deposit,-,-,-,-,1000,-,1000
 """
 
     result = IBKRTransactionParser().parse_text(text)
@@ -33,7 +38,28 @@ Transaction History,Data,2026-07-08,U***32596,REP Cash Dividend,Dividend,REP,-,-
     assert trade.fees == pytest.approx(3.83)
     assert trade.metadata["commission"] == pytest.approx(-3)
     assert trade.metadata["transaction_costs"] == pytest.approx(0.83)
-    assert result.cash_transactions["transaction_type"].tolist() == ["Transaction Fee", "Dividend"]
+    assert result.cash_transactions["transaction_type"].tolist() == ["Transaction Fee", "Dividend", "Deposit"]
+    assert [trade.side for trade in result.cash_trades] == ["BUY", "BUY"]
+    assert [trade.instrument_id for trade in result.cash_trades] == ["EUR_CASH", "EUR_CASH"]
+    assert [trade.amount for trade in result.cash_trades] == [pytest.approx(16.53), pytest.approx(1000)]
+    assert [trade.metadata["broker_transaction_type"] for trade in result.cash_trades] == ["Dividend", "Deposit"]
+
+
+def test_ibkr_import_result_infers_missing_instruments():
+    text = """Statement,Header,Field Name,Field Value
+Summary,Header,Field Name,Field Value
+Summary,Data,Base Currency,EUR
+Transaction History,Header,Date,Account,Description,Transaction Type,Symbol,Quantity,Price,Price Currency,Gross Amount ,Commission,Net Amount
+Transaction History,Data,2026-04-16,U***32596,REPSOL SA,Buy,REP,2.0,20.65,EUR,-41.3,-3.0,-44.3
+"""
+
+    result = IBKRTransactionParser().parse_text(text)
+    instruments = result.instruments(yahoo_symbols={"REP": "REP.MC"})
+
+    assert len(instruments) == 1
+    assert instruments[0].instrument_id == "REP"
+    assert instruments[0].data_symbol == "REP.MC"
+    assert instruments[0].metadata["ibkr_symbol"] == "REP"
 
 
 def test_ibkr_trade_id_does_not_depend_on_statement_row_number():
@@ -160,8 +186,36 @@ def test_renta4_transaction_aliases_mark_canonical_instrument_replacements():
 
     _record_transaction_aliases(raw, {"LU0012186622": instrument})
 
+    assert instrument.currency == "USD"
     assert instrument.metadata["replaces_instrument_ids"] == ["R4_BNP_USD_MONEY_MARKET_C_USD_ACC"]
     assert instrument.metadata["renta4_transaction_names"] == ['BNP USD MONEY MARKET "C" (USD) ACC']
+
+
+def test_renta4_market_data_currency_follows_corrected_instrument_currency():
+    instrument = Instrument(
+        instrument_id="LU0012186622",
+        name="Bnp Paribas Usd Money Market Classic C",
+        instrument_type="fund",
+        asset_class="fund",
+        currency="USD",
+        data_source="renta4",
+    )
+    market_data = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-01-01"),
+                "instrument_id": "LU0012186622",
+                "value": 229.82,
+                "currency": "EUR",
+                "value_type": "nav",
+                "source": "renta4",
+            }
+        ]
+    )
+
+    synced = _sync_market_data_currencies(market_data, {"LU0012186622": instrument})
+
+    assert synced.loc[0, "currency"] == "USD"
 
 
 def test_renta4_fallback_instruments_keep_transaction_fund_names():

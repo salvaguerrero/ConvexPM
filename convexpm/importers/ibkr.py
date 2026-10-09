@@ -11,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 
+from convexpm.instruments import Instrument
 from convexpm.transactions import Trade
 
 
@@ -19,9 +20,64 @@ class IBKRImportResult:
     """Normalized IBKR import output."""
 
     trades: list[Trade]
+    cash_trades: list[Trade]
     cash_transactions: pd.DataFrame
     raw_transactions: pd.DataFrame
     summary: dict[str, Any]
+
+    def instruments(
+        self,
+        *,
+        yahoo_symbols: dict[str, str] | None = None,
+        known_ids: set[str] | None = None,
+        fetch_yahoo_metadata: bool = False,
+        ticker_factory: Any | None = None,
+    ) -> list[Instrument]:
+        """Infer missing tradable instruments from IBKR trades."""
+        yahoo_symbols = yahoo_symbols or {}
+        known_ids = known_ids or set()
+        instruments: list[Instrument] = []
+        trade_rows = self.raw_transactions.loc[
+            self.raw_transactions["transaction_type"].isin(["Buy", "Sell"])
+        ]
+        for symbol in sorted({trade.instrument_id for trade in self.trades} - known_ids):
+            rows = trade_rows.loc[trade_rows["symbol"] == symbol]
+            if rows.empty:
+                continue
+            first_row = rows.iloc[0]
+            data_symbol = yahoo_symbols.get(symbol, symbol)
+            name = str(first_row["description"]).strip() or symbol
+            currency = str(first_row.get("price_currency") or first_row.get("base_currency") or "EUR").upper()
+            metadata = {
+                "source": "ibkr_transactions",
+                "ibkr_symbol": symbol,
+                "yahoo_symbol": data_symbol,
+            }
+            if fetch_yahoo_metadata:
+                try:
+                    ticker = ticker_factory(data_symbol) if ticker_factory is not None else _yahoo_ticker(data_symbol)
+                    yahoo_info = ticker.get_info() if hasattr(ticker, "get_info") else getattr(ticker, "info", {})
+                    if isinstance(yahoo_info, dict):
+                        name = yahoo_info.get("longName") or yahoo_info.get("shortName") or name
+                        currency = yahoo_info.get("currency") or currency
+                        metadata["yahoo_quote_type"] = yahoo_info.get("quoteType")
+                        metadata["yahoo_exchange"] = yahoo_info.get("exchange")
+                except Exception as exc:
+                    metadata["yahoo_error"] = str(exc)
+
+            instruments.append(
+                Instrument(
+                    instrument_id=symbol,
+                    name=name,
+                    instrument_type="equity",
+                    asset_class="equity",
+                    currency=currency,
+                    data_source="yahoo",
+                    data_symbol=data_symbol,
+                    metadata={key: value for key, value in metadata.items() if value is not None},
+                )
+            )
+        return instruments
 
 
 class IBKRTransactionParser:
@@ -60,6 +116,7 @@ class IBKRTransactionParser:
         if raw.empty:
             return IBKRImportResult(
                 trades=[],
+                cash_trades=[],
                 cash_transactions=pd.DataFrame(),
                 raw_transactions=raw,
                 summary=summary,
@@ -68,8 +125,10 @@ class IBKRTransactionParser:
         normalized = _normalize_transactions(raw, base_currency=str(summary.get("Base Currency") or "EUR"))
         trades = _build_trades(normalized, base_currency=str(summary.get("Base Currency") or "EUR"))
         cash = normalized.loc[~normalized["transaction_type"].isin(["Buy", "Sell"])].reset_index(drop=True)
+        cash_trades = _build_cash_trades(cash, trade_rows=normalized, base_currency=str(summary.get("Base Currency") or "EUR"))
         return IBKRImportResult(
             trades=trades,
+            cash_trades=cash_trades,
             cash_transactions=cash,
             raw_transactions=normalized,
             summary=summary,
@@ -175,6 +234,85 @@ def _build_trades(df: pd.DataFrame, *, base_currency: str) -> list[Trade]:
     return sorted(trades, key=lambda trade: (trade.date, trade.instrument_id, trade.trade_id))
 
 
+def _build_cash_trades(cash: pd.DataFrame, *, trade_rows: pd.DataFrame, base_currency: str) -> list[Trade]:
+    if cash.empty:
+        return []
+
+    allocated_fee_keys = set(
+        trade_rows.loc[trade_rows["transaction_type"].isin(["Buy", "Sell"]), ["date", "account", "symbol"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    cash_trades: list[Trade] = []
+    for _, row in cash.iterrows():
+        transaction_type = str(row.get("transaction_type") or "").strip()
+        if _is_allocated_transaction_fee(row, allocated_fee_keys):
+            continue
+
+        net_amount = _cash_row_amount(row)
+        if net_amount == 0:
+            continue
+
+        currency = str(row.get("base_currency") or base_currency).upper()
+        side = "BUY" if net_amount > 0 else "SELL"
+        amount = abs(net_amount)
+        trade_date = row["date"]
+        symbol = row.get("symbol")
+        trade_id = _stable_trade_id(
+            self_source="ibkr-cash",
+            values=[
+                str(trade_date.date()),
+                str(row.get("account")),
+                transaction_type,
+                "" if pd.isna(symbol) else str(symbol),
+                _stable_number(net_amount),
+                str(row.get("_row_number")),
+            ],
+        )
+        cash_trades.append(
+            Trade(
+                trade_id=trade_id,
+                date=trade_date.date(),
+                instrument_id=f"{currency}_CASH",
+                side=side,
+                quantity=amount,
+                amount=amount,
+                value_per_unit=1.0,
+                fees=0.0,
+                currency=currency,
+                account=None if pd.isna(row.get("account")) else str(row.get("account")),
+                tags=["ibkr", "cash"],
+                metadata={
+                    "source": "ibkr_cash",
+                    "broker_transaction_type": transaction_type,
+                    "description": None if pd.isna(row.get("description")) else str(row.get("description")),
+                    "symbol": None if pd.isna(symbol) else str(symbol),
+                    "gross_amount": row.get("gross_amount"),
+                    "net_amount": row.get("net_amount"),
+                    "source_row": int(row["_row_number"]),
+                },
+            )
+        )
+    return sorted(cash_trades, key=lambda trade: (trade.date, trade.trade_id))
+
+
+def _is_allocated_transaction_fee(row: pd.Series, allocated_fee_keys: set[tuple[object, ...]]) -> bool:
+    if row.get("transaction_type") != "Transaction Fee":
+        return False
+    key = (row.get("date"), row.get("account"), row.get("symbol"))
+    return key in allocated_fee_keys
+
+
+def _cash_row_amount(row: pd.Series) -> float:
+    net_amount = row.get("net_amount")
+    if net_amount is not None and not pd.isna(net_amount):
+        return float(net_amount)
+    gross_amount = row.get("gross_amount")
+    if gross_amount is not None and not pd.isna(gross_amount):
+        return float(gross_amount)
+    return 0.0
+
+
 def _weighted_price(group: pd.DataFrame) -> float | None:
     priced = group.dropna(subset=["price", "quantity"])
     if priced.empty:
@@ -224,3 +362,9 @@ def _stable_number(value: float | None) -> str:
     if value is None:
         return ""
     return f"{float(value):.8f}"
+
+
+def _yahoo_ticker(symbol: str) -> Any:
+    import yfinance as yf
+
+    return yf.Ticker(symbol)

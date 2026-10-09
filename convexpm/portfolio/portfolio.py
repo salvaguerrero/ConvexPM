@@ -15,12 +15,13 @@ import pandas as pd
 from convexpm.analytics.current_risk import current_risk as build_current_risk
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
+from convexpm.analytics.returns import cash_settlement_parent_ids, is_external_capital_flow
 from convexpm.analytics.views import performance_view as build_performance_view, risk_view as build_risk_view
 from convexpm.analytics.portfolio_analysis import analyze_portfolio
 from convexpm.analytics.risk import risk_summary
 from convexpm.portfolio.allocation import market_values as build_market_values
 from convexpm.portfolio.allocation import weights as build_weights
-from convexpm.instruments import InstrumentRegistry
+from convexpm.instruments import Instrument, InstrumentRegistry
 from convexpm.market_data import MarketDataStore
 from convexpm.portfolio.holdings import build_holdings
 from convexpm.portfolio.valuation import nav_history as build_nav_history
@@ -36,6 +37,7 @@ PORTFOLIO_TRADES_FILENAME = "trades.parquet"
 DEFAULT_PORTFOLIOS_ROOT = Path("data/portfolios")
 PORTFOLIO_FORMAT_VERSION = 1
 ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{10}$")
+CASH_INSTRUMENT_SUFFIX = "_CASH"
 
 
 @dataclass
@@ -67,23 +69,29 @@ class Portfolio:
         if self.market_data is None:
             self.market_data = MarketDataStore()
 
-    def add_trade(self, trade: Trade) -> None:
+    def add_trade(self, trade: Trade, *, cash_ledger: bool = False) -> None:
         """Add a trade to the portfolio ledger.
 
         Trade IDs are unique within a portfolio. Call :meth:`save` afterwards
         to persist the updated ledger.
         """
-        if any(existing.trade_id == trade.trade_id for existing in self.trades):
-            raise ValueError(f"Duplicate trade_id in portfolio: {trade.trade_id}")
-        self.trades.append(trade)
-        self.trades.sort(key=lambda item: (item.date, item.trade_id))
+        self.add_trades([trade], duplicate="raise", cash_ledger=cash_ledger)
 
-    def add_trades(self, trades: list[Trade], *, duplicate: str = "skip") -> int:
+    def add_trades(
+        self,
+        trades: list[Trade],
+        *,
+        duplicate: str = "skip",
+        cash_ledger: bool = False,
+    ) -> int:
         """Add multiple trades and return the number inserted.
 
         ``duplicate="skip"`` makes repeated imports idempotent by ignoring
         trades whose stable ``trade_id`` is already present in the portfolio.
         Use ``duplicate="raise"`` to surface duplicates as errors.
+
+        Set ``cash_ledger=True`` to add a generated cash leg for every
+        non-cash trade with a known amount. Buys reduce cash; sells increase it.
         """
         if duplicate not in {"skip", "raise"}:
             raise ValueError("duplicate must be 'skip' or 'raise'")
@@ -91,7 +99,8 @@ class Portfolio:
         existing_by_id = {trade.trade_id: trade for trade in self.trades}
         existing_by_key = {_trade_identity_key(trade): trade for trade in self.trades}
         inserted = 0
-        for trade in trades:
+        for trade in self._trades_with_cash_legs(trades) if cash_ledger else trades:
+            self._ensure_cash_price_for_trade(trade)
             trade_key = _trade_identity_key(trade)
             existing = existing_by_id.get(trade.trade_id) or existing_by_key.get(trade_key)
             if existing is not None:
@@ -105,6 +114,85 @@ class Portfolio:
             inserted += 1
         self.trades.sort(key=lambda item: (item.date, item.trade_id))
         return inserted
+
+    def _trades_with_cash_legs(self, trades: list[Trade]) -> list[Trade]:
+        expanded: list[Trade] = []
+        for trade in trades:
+            expanded.append(trade)
+            cash_leg = self._cash_leg_for_trade(trade)
+            if cash_leg is not None:
+                expanded.append(cash_leg)
+        return expanded
+
+    def _cash_leg_for_trade(self, trade: Trade) -> Trade | None:
+        if _is_cash_instrument_id(trade.instrument_id):
+            return None
+
+        amount = _trade_amount_in_trade_currency(trade)
+        if amount is None:
+            return None
+
+        currency = (trade.currency or self.base_currency).upper()
+        cash_amount = amount + float(trade.fees) if trade.side == "BUY" else max(amount - float(trade.fees), 0.0)
+        if cash_amount == 0:
+            return None
+
+        self._ensure_cash_instrument(currency, trade.date)
+        cash_side = "SELL" if trade.side == "BUY" else "BUY"
+        cash_instrument_id = _cash_instrument_id(currency)
+        return Trade(
+            trade_id=f"{trade.trade_id}:cash",
+            date=trade.date,
+            instrument_id=cash_instrument_id,
+            side=cash_side,
+            quantity=cash_amount,
+            amount=cash_amount,
+            value_per_unit=1.0,
+            fees=0.0,
+            currency=currency,
+            account=trade.account,
+            tags=[*trade.tags, "cash"] if "cash" not in trade.tags else list(trade.tags),
+            metadata={
+                "source": "cash_ledger",
+                "parent_trade_id": trade.trade_id,
+                "parent_instrument_id": trade.instrument_id,
+                "parent_side": trade.side,
+            },
+        )
+
+    def _ensure_cash_price_for_trade(self, trade: Trade) -> None:
+        if _is_cash_instrument_id(trade.instrument_id):
+            currency = trade.instrument_id[: -len(CASH_INSTRUMENT_SUFFIX)]
+            self._ensure_cash_instrument(currency, trade.date)
+
+    def _ensure_cash_instrument(self, currency: str, trade_date: date) -> None:
+        currency = currency.upper()
+        instrument_id = _cash_instrument_id(currency)
+        if instrument_id not in self.registry:
+            self.registry.add(
+                Instrument(
+                    instrument_id=instrument_id,
+                    name=f"{currency} Cash",
+                    instrument_type="cash",
+                    asset_class="cash",
+                    currency=currency,
+                    data_source="manual",
+                    data_symbol=None,
+                    metadata={"source": "cash_ledger"},
+                )
+            )
+        self.market_data.upsert(
+            pd.DataFrame(
+                {
+                    "date": [pd.Timestamp(trade_date)],
+                    "instrument_id": [instrument_id],
+                    "value": [1.0],
+                    "currency": [currency],
+                    "value_type": ["cash"],
+                    "source": ["cash_ledger"],
+                }
+            )
+        )
 
     def delete_trade(self, number_or_trade_id: int | str) -> Trade:
         """Delete a trade by one-based row number or ``trade_id`` and return it."""
@@ -291,6 +379,7 @@ class Portfolio:
         start: DateLike | None = None,
         end: DateLike | None = None,
         *,
+        risk_free_rate: float = 0.0,
         periods_per_year: int = 252,
     ):
         """Return the simple current-allocation risk view used by the product/REPL."""
@@ -298,6 +387,7 @@ class Portfolio:
             self,
             start=start,
             end=end,
+            risk_free_rate=risk_free_rate,
             periods_per_year=periods_per_year,
         )
 
@@ -514,12 +604,21 @@ class Portfolio:
             "currency",
             "status",
         ]
-        return f"{header}\nNAV: {total:,.2f} {self.base_currency}\n{summary.loc[:, display_columns].to_string(index=False)}"
+        display = summary.loc[:, display_columns].copy()
+        fx_rate = pd.to_numeric(summary["fx_rate"], errors="coerce")
+        price = pd.to_numeric(summary["price"], errors="coerce")
+        display["price"] = price * fx_rate
+        display["weight"] = pd.to_numeric(display["weight"], errors="coerce") * 100.0
+        display["currency"] = self.base_currency
+        return f"{header}\nNAV: {total:,.2f} {self.base_currency}\n{display.to_string(index=False)}"
 
     def _repr_html_(self) -> str:
         summary = self.summary()
         total = pd.to_numeric(summary.get("market_value", pd.Series(dtype=float)), errors="coerce").sum()
-        return f"<h3>{self.name} ({self.base_currency}) - NAV {total:,.2f}</h3>" + summary._repr_html_()
+        display = summary.copy()
+        if "weight" in display:
+            display["weight"] = pd.to_numeric(display["weight"], errors="coerce") * 100.0
+        return f"<h3>{self.name} ({self.base_currency}) - NAV {total:,.2f}</h3>" + display._repr_html_()
 
     def _default_date(self) -> date:
         candidates: list[date] = []
@@ -540,7 +639,12 @@ class PortfolioStats:
     @property
     def summary(self) -> pd.Series:
         nav = self.portfolio.nav_history(skip_missing_prices=True)
-        return _stats_for_nav(nav)
+        return _stats_for_nav(
+            nav,
+            portfolio=self.portfolio,
+            risk_free_rate=0.0,
+            periods_per_year=252,
+        )
 
     def by_period(
         self,
@@ -559,16 +663,22 @@ class PortfolioStats:
             last_date = nav["date"].max()
             nav = nav.loc[nav["date"] > last_date - _period_offset(periods, freq)]
         grouped = nav.groupby(nav["date"].dt.to_period(freq), sort=True)
-        return pd.DataFrame(
-            {
-                str(period): _stats_for_nav(
-                    group,
-                    risk_free_rate=risk_free_rate,
-                    periods_per_year=periods_per_year,
-                )
-                for period, group in grouped
-            }
+        columns = {
+            str(period): _stats_for_nav(
+                group,
+                portfolio=self.portfolio,
+                risk_free_rate=risk_free_rate,
+                periods_per_year=periods_per_year,
+            )
+            for period, group in grouped
+        }
+        columns["All"] = _stats_for_nav(
+            nav,
+            portfolio=self.portfolio,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
         )
+        return pd.DataFrame(columns)
 
     def __call__(
         self,
@@ -647,6 +757,22 @@ def _trade_instrument_identity(trade: Trade, source: str) -> str:
     return trade.instrument_id
 
 
+def _cash_instrument_id(currency: str) -> str:
+    return f"{currency.upper()}{CASH_INSTRUMENT_SUFFIX}"
+
+
+def _is_cash_instrument_id(instrument_id: str) -> bool:
+    return instrument_id.upper().endswith(CASH_INSTRUMENT_SUFFIX)
+
+
+def _trade_amount_in_trade_currency(trade: Trade) -> float | None:
+    if trade.amount is not None:
+        return float(trade.amount)
+    if trade.quantity is not None and trade.value_per_unit is not None:
+        return float(trade.quantity) * float(trade.value_per_unit)
+    return None
+
+
 def _upgrade_duplicate_trade(existing: Trade, incoming: Trade) -> None:
     if not _is_renta4_canonical_upgrade(existing, incoming):
         return
@@ -693,6 +819,7 @@ def _rounded_trade_number(value: float | None) -> float | None:
 def _stats_for_nav(
     nav: pd.DataFrame,
     *,
+    portfolio: Portfolio | None = None,
     risk_free_rate: float = 0.0,
     periods_per_year: int = 252,
 ) -> pd.Series:
@@ -708,21 +835,92 @@ def _stats_for_nav(
         if not returns.empty and volatility and pd.notna(volatility)
         else pd.NA
     )
-    return pd.Series(
-        {
-            "observations": len(nav),
-            "first_date": nav["date"].min(),
-            "last_date": nav["date"].max(),
-            "first_nav": values.iloc[0],
-            "last_nav": values.iloc[-1],
-            "min_nav": values.min(),
-            "max_nav": values.max(),
-            "total_return": (values.iloc[-1] / values.iloc[0] - 1) if values.iloc[0] else pd.NA,
-            "mean_return": returns.mean() if not returns.empty else pd.NA,
-            "volatility": volatility if not returns.empty else pd.NA,
-            "sharpe": sharpe,
-        }
-    )
+    first_date = pd.Timestamp(nav["date"].min()).date()
+    last_date = pd.Timestamp(nav["date"].max()).date()
+    nav_total_return = (values.iloc[-1] / values.iloc[0] - 1) if values.iloc[0] else pd.NA
+    stats = {
+        "observations": len(nav),
+        "first_date": first_date,
+        "last_date": last_date,
+        "first_nav": values.iloc[0],
+        "last_nav": values.iloc[-1],
+        "min_nav": values.min(),
+        "max_nav": values.max(),
+        "total_return": nav_total_return,
+        "nav_total_return": nav_total_return,
+        "asset_return": pd.NA,
+        "capital_inflows": pd.NA,
+        "capital_outflows": pd.NA,
+        "net_capital_flow": pd.NA,
+        "mean_return": returns.mean() if not returns.empty else pd.NA,
+        "volatility": volatility if not returns.empty else pd.NA,
+        "sharpe": sharpe,
+    }
+    if portfolio is not None:
+        stats.update(_portfolio_flow_and_asset_stats(portfolio, first_date=first_date, last_date=last_date))
+    return pd.Series(stats)
+
+
+def _portfolio_flow_and_asset_stats(
+    portfolio: Portfolio,
+    *,
+    first_date: date,
+    last_date: date,
+) -> dict[str, object]:
+    inflows = 0.0
+    outflows = 0.0
+    settlement_parent_ids = cash_settlement_parent_ids(portfolio.trades)
+    for trade in portfolio.trades:
+        if trade.date < first_date or trade.date > last_date:
+            continue
+        if not is_external_capital_flow(trade, settlement_parent_ids=settlement_parent_ids):
+            continue
+        amount = _trade_amount_in_base(portfolio, trade)
+        if amount is None:
+            continue
+        if trade.side == "BUY":
+            inflows += amount + float(trade.fees)
+        else:
+            outflows += max(amount - float(trade.fees), 0.0)
+
+    asset_return: object = pd.NA
+    try:
+        asset_return = float(
+            portfolio.performance_view(start=first_date, end=last_date).summary[
+                "portfolio_return_ex_cash_flows (%)"
+            ]
+        ) / 100.0
+    except (KeyError, ValueError, ZeroDivisionError):
+        pass
+
+    return {
+        "asset_return": asset_return,
+        "capital_inflows": inflows,
+        "capital_outflows": outflows,
+        "net_capital_flow": inflows - outflows,
+    }
+
+
+def _trade_amount_in_base(portfolio: Portfolio, trade: Trade) -> float | None:
+    amount = trade.amount
+    if amount is None and trade.quantity is not None and trade.value_per_unit is not None:
+        amount = float(trade.quantity) * float(trade.value_per_unit)
+    if amount is None and trade.quantity is not None:
+        try:
+            amount = float(trade.quantity) * float(portfolio.market_data.get_value(trade.instrument_id, trade.date))
+        except KeyError:
+            return None
+    if amount is None:
+        return None
+
+    currency = (trade.currency or portfolio.base_currency).upper()
+    if currency == portfolio.base_currency:
+        return float(amount)
+    try:
+        fx_rate, _ = fx_rate_to_base(currency, portfolio.base_currency, portfolio.market_data, trade.date)
+    except KeyError:
+        return float(amount)
+    return float(amount) * float(fx_rate)
 
 
 def _normalize_stats_freq(freq: str) -> str:

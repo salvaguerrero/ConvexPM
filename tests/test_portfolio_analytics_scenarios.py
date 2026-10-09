@@ -38,7 +38,12 @@ def test_portfolio_terminal_summary_stats_and_plot(tmp_path):
     assert summary.loc[0, "market_value"] == pytest.approx(120.0)
     assert summary.loc[0, "weight"] == pytest.approx(1.0)
     assert portfolio.stats["total_return"] == pytest.approx(0.2)
-    assert "2026" in portfolio.stats().columns
+    stats = portfolio.stats()
+    assert "2026" in stats.columns
+    assert "All" in stats.columns
+    assert portfolio.stats["first_date"] == date(2026, 1, 1)
+    assert portfolio.stats["asset_return"] == pytest.approx(0.2)
+    assert portfolio.stats["capital_inflows"] == pytest.approx(100.0)
     assert "NAV: 120.00 EUR" in repr(portfolio)
 
     import matplotlib
@@ -166,7 +171,7 @@ def test_exposure_by_asset_class_and_currency(tmp_path):
 
     assert by_asset.loc[0, "asset_class"] == "equity"
     assert by_asset.loc[0, "market_value"] == pytest.approx(120.0)
-    assert by_asset.loc[0, "weight"] == pytest.approx(1.0)
+    assert by_asset.loc[0, "weight"] == pytest.approx(100.0)
     assert by_currency.loc[0, "currency"] == "EUR"
 
 

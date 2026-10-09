@@ -33,5 +33,5 @@ def exposure_by(portfolio: object, *, by: str = "asset_class", date: DateLike) -
     valued[by] = [group_for_instrument(instrument_id) for instrument_id in valued["instrument_id"]]
     grouped = valued.groupby(by, dropna=False, as_index=False)["market_value"].sum()
     total = grouped["market_value"].sum()
-    grouped["weight"] = grouped["market_value"] / total if total else 0.0
+    grouped["weight"] = (grouped["market_value"] / total * 100.0) if total else 0.0
     return grouped.sort_values("market_value", ascending=False).reset_index(drop=True)

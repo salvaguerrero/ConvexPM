@@ -198,6 +198,37 @@ def test_portfolio_add_trades_is_idempotent():
     assert len(portfolio.trades) == 1
 
 
+def test_portfolio_add_trades_can_create_double_entry_cash_leg():
+    trade = Trade(
+        trade_id="gold-buy",
+        date=date(2027, 7, 3),
+        instrument_id="GC=F",
+        side="BUY",
+        quantity=0.5,
+        amount=930.5,
+        value_per_unit=1861.0,
+        fees=1.0,
+        currency="EUR",
+        account="manual",
+        tags=["manual"],
+    )
+    portfolio = Portfolio(name="Main", base_currency="EUR")
+
+    assert portfolio.add_trades([trade], cash_ledger=True) == 2
+    assert portfolio.add_trades([trade], cash_ledger=True) == 0
+    assert [item.trade_id for item in portfolio.trades] == ["gold-buy", "gold-buy:cash"]
+
+    cash_leg = portfolio.trades.to_list()[1]
+    assert cash_leg.instrument_id == "EUR_CASH"
+    assert cash_leg.side == "SELL"
+    assert cash_leg.quantity == 931.5
+    assert cash_leg.amount == 931.5
+    assert cash_leg.metadata["parent_trade_id"] == "gold-buy"
+    assert "EUR_CASH" in portfolio.registry
+    assert portfolio.market_data.get_value("EUR_CASH", date(2027, 7, 3), exact=True) == 1.0
+    assert portfolio.holdings(date(2027, 7, 3)) == {"EUR_CASH": -931.5, "GC=F": 0.5}
+
+
 def test_portfolio_add_trades_skips_same_trade_with_different_id():
     existing = Trade(
         trade_id="old-id",

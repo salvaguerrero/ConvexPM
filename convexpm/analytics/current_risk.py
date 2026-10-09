@@ -63,6 +63,7 @@ def current_risk(
 
     correlation = returns.corr()
     covariance = returns.cov()
+    covariance.attrs["returns"] = returns
     synthetic = returns.mul(current_weights, axis=1).sum(axis=1)
     synthetic.name = "portfolio_return"
 

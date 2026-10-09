@@ -114,6 +114,7 @@ class Renta4ImportParser:
             if market_frames
             else pd.DataFrame(columns=MARKET_DATA_COLUMNS)
         )
+        market_data = _sync_market_data_currencies(market_data, instruments_by_id)
         raw_transactions = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame()
 
         return Renta4ImportResult(
@@ -370,6 +371,13 @@ def _record_transaction_aliases(raw: pd.DataFrame, instruments_by_id: dict[str, 
             for value in rows["fund_name"].dropna().tolist()
             if str(value).strip()
         }
+        currencies = {
+            currency
+            for name in transaction_names
+            if (currency := _explicit_fund_currency(name)) is not None
+        }
+        if len(currencies) == 1:
+            instrument.currency = next(iter(currencies))
         _extend_metadata_list(instrument.metadata, "replaces_instrument_ids", fallback_ids)
         _extend_metadata_list(instrument.metadata, "renta4_transaction_names", transaction_names)
 
@@ -383,11 +391,30 @@ def _extend_metadata_list(metadata: dict[str, Any], key: str, values: Iterable[s
 
 
 def _fund_currency(fund_name: str) -> str:
+    return _explicit_fund_currency(fund_name) or "EUR"
+
+
+def _explicit_fund_currency(fund_name: str) -> str | None:
     upper_name = fund_name.upper()
     for currency in ["EUR", "USD", "GBP", "CHF", "JPY"]:
         if re.search(rf"\b{currency}\b|\({currency}\)", upper_name):
             return currency
-    return "EUR"
+    return None
+
+
+def _sync_market_data_currencies(
+    market_data: pd.DataFrame,
+    instruments_by_id: dict[str, Instrument],
+) -> pd.DataFrame:
+    if market_data.empty or "instrument_id" not in market_data or "currency" not in market_data:
+        return market_data
+    currency_by_id = {
+        instrument_id: instrument.currency
+        for instrument_id, instrument in instruments_by_id.items()
+    }
+    synced = market_data.copy()
+    synced["currency"] = synced["instrument_id"].map(currency_by_id).fillna(synced["currency"])
+    return synced
 
 
 def _best_instrument_match(name: str, instruments: Iterable[Instrument]) -> Instrument | None:
