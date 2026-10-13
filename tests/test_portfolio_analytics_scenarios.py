@@ -29,7 +29,7 @@ def test_nav_history(tmp_path):
     assert portfolio.nav(date(2026, 1, 4)) == pytest.approx(120.0)
 
 
-def test_portfolio_terminal_summary_stats_and_plot(tmp_path):
+def test_portfolio_terminal_summary(tmp_path):
     portfolio = _sample_portfolio(tmp_path)
 
     summary = portfolio.summary()
@@ -37,24 +37,13 @@ def test_portfolio_terminal_summary_stats_and_plot(tmp_path):
     assert summary.loc[0, "instrument_id"] == "REP_MC"
     assert summary.loc[0, "market_value"] == pytest.approx(120.0)
     assert summary.loc[0, "weight"] == pytest.approx(1.0)
-    assert portfolio.stats["total_return"] == pytest.approx(0.2)
-    stats = portfolio.stats()
-    assert "2026" in stats.columns
-    assert "All" in stats.columns
-    assert portfolio.stats["first_date"] == date(2026, 1, 1)
-    assert portfolio.stats["asset_return"] == pytest.approx(0.2)
-    assert portfolio.stats["capital_inflows"] == pytest.approx(100.0)
     assert "NAV: 120.00 EUR" in repr(portfolio)
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    assert portfolio.plot(show=False).get_title() == "Test NAV"
-    assert "Test NAV" in repr(portfolio.plot_text(width=20, height=5))
-    assert "Test NAV" in repr(portfolio.plot(style="terminal", width=20, height=5))
+    assert not hasattr(portfolio, "stats")
+    assert not hasattr(portfolio, "plot_text")
+    assert not hasattr(portfolio, "plot")
 
 
-def test_portfolio_stats_skip_unpriced_holdings(tmp_path):
+def test_portfolio_summary_skips_unpriced_holdings(tmp_path):
     portfolio = _sample_portfolio(tmp_path)
     portfolio.add_trade(
         Trade(
@@ -67,11 +56,8 @@ def test_portfolio_stats_skip_unpriced_holdings(tmp_path):
     )
 
     summary = portfolio.summary()
-    stats = portfolio.stats(12, freq="M")
 
     assert "missing_price" in summary["status"].tolist()
-    assert "2026-01" in stats.columns
-    assert portfolio.stats["last_nav"] == pytest.approx(120.0)
 
 
 def test_portfolio_uses_fx_market_data_for_base_currency_valuation(tmp_path):

@@ -18,6 +18,9 @@ From this project folder:
 pip install -e .
 ```
 
+This installs the local analytics package plus its charting dependencies,
+including `lightweight-charts` for interactive TradingView-style charts.
+
 For development and tests:
 
 ```bash
@@ -107,6 +110,18 @@ fund_buy = Trade(
 
 If `quantity` is missing, ConvexPM can derive it later when it has a `value_per_unit` or market data for the trade date.
 
+When you add trades, you can optionally generate the matching cash settlement
+leg at the same time:
+
+```python
+portfolio.add_trades([buy_repsol], cash_ledger=True)
+portfolio.save()
+```
+
+Cash instruments such as `EUR_CASH` are priced at `1.0` and are treated as
+cash positions. Generated settlement legs are internal portfolio activity, so
+they are not double-counted as external contributions in performance views.
+
 ### Saving And Loading A Portfolio
 
 Trades belong to a portfolio. ConvexPM stores each portfolio in its own local folder:
@@ -119,7 +134,8 @@ data/
         └── trades.parquet
 ```
 
-`portfolio.json` stores portfolio metadata such as the name and base currency.
+`portfolio.json` stores portfolio metadata such as the name, base currency,
+and optional benchmark.
 `trades.parquet` is the source-of-truth transaction ledger.
 
 ```python
@@ -151,6 +167,16 @@ you can save it again without repeating the portfolio ID:
 portfolio.add_trade(new_trade)
 portfolio.save()
 ```
+
+You can also store a default benchmark once:
+
+```python
+portfolio.set_benchmark("IE0002639668")
+portfolio.save()
+```
+
+`performance_view()` will use the stored benchmark unless you override it for a
+single call.
 
 The instrument registry (`data/instruments.parquet`) and market-data store
 (`data/market_data.parquet`) remain shared across portfolios, so historical prices
@@ -244,7 +270,7 @@ registry.save()
 store.upsert(market_df)
 ```
 
-The parser assumes EUR for Renta 4 funds in V1.
+The parser assumes EUR for Renta 4 funds.
 
 ## Broker Imports
 
@@ -279,6 +305,13 @@ store.upsert(r4_import.market_data)
 The Renta 4 importer maps fund operations to ISINs when the fund appears in a
 NAV export. If a fund has transactions but no NAV file, it receives a generated
 `R4_...` instrument ID.
+
+Renta 4 `extractosPatrimonio*.xls` files are also read when they include the
+`Saldo en Divisa` sheet. Only account transfers, custody fees, IVA, and
+withholding rows become `EUR_CASH` trades from that sheet. Fund purchase and
+sale cash rows in `Saldo en Divisa` are ignored because fund subscriptions and
+redemptions come from the fund-operation `.xls` files; add those Renta 4 trades
+with `cash_ledger=True` to generate the matching cash settlement legs.
 
 ## Build A Portfolio
 
@@ -342,56 +375,149 @@ nav = portfolio.nav_history()
 print(nav)
 ```
 
-V1 valuation is:
+Valuation is:
 
 ```text
-NAV = sum(quantity * value)
+NAV = sum(quantity * value converted to portfolio base currency)
 ```
 
-FX conversion is not implemented yet, so instruments should already be in the portfolio base currency.
+FX conversion uses saved FX market-data instruments such as `USDEUR` or
+`EURUSD` when an instrument currency differs from the portfolio base currency.
 
 ## Analytics
 
-### Performance
+ConvexPM now has two analytics layers:
+
+- Low-level analytics such as `performance()`, `risk()`, `current_risk()`, and
+  `analyze()` remain available for programmatic use.
+- The higher-level `performance_view()` is the preferred interactive workflow.
+  It returns styled terminal tables with yearly columns and a `Total` column.
+
+### Performance View
 
 ```python
-performance = portfolio.performance()
-print(performance)
+performance = portfolio.performance_view(start="2020-01-01")
 ```
 
-Included metrics:
-
-- `total_return`
-- `cagr`
-- `ytd_return`
-- `mtd_return`
-- `twr`
-- `xirr`
-- `latest_monthly_return`
-- `latest_rolling_252_return`
-
-### Risk
+The summary table answers "how did my portfolio perform?" by year and in total:
 
 ```python
-risk = portfolio.risk(risk_free_rate=0.02)
-print(risk)
+performance.summary
 ```
 
-Included metrics:
+It includes:
 
-- `annualized_volatility`
-- `max_drawdown`
-- `current_drawdown`
-- `downside_deviation`
-- `sharpe_ratio`
-- `sortino_ratio`
-- `historical_var_95`
-- `historical_cvar_95`
+- `portfolio_return (%)`
+- `cagr (%)`
+- `volatility (%)`
+- `sharpe`
+- `max_drawdown (%)`
+- `benchmark_return (%)`
+- `alpha (%)`
+- `beta`
+- `capital_inflows`
+- `capital_outflows`
+- `net_capital_flow`
+- `start_nav`
+- `end_nav`
+- `delta_nav`
+- `capital_gain`
 
-You can also pass benchmark NAV history to calculate beta and correlation:
+Set a benchmark once on the portfolio:
 
 ```python
-risk = portfolio.risk(benchmark_nav=benchmark_nav)
+portfolio.set_benchmark("IE0002639668")
+portfolio.save()
+performance = portfolio.performance_view()
+```
+
+Or override it for one analysis:
+
+```python
+performance = portfolio.performance_view(benchmark="AAPL")
+```
+
+Benchmark lookup accepts `instrument_id`, ticker/data symbol, or exact
+instrument name.
+
+Standalone asset metrics ignore portfolio weights and answer how each asset
+behaved while it was held:
+
+```python
+performance.standalone_asset_returns
+performance.standalone_asset_volatility
+performance.standalone_asset_alpha
+performance.standalone_asset_beta
+performance.standalone_asset_drawdown
+```
+
+Contribution tables include the portfolio-weighted effect of each asset:
+
+```python
+performance.asset_weights
+performance.return_contribution
+performance.volatility_contribution
+performance.drawdown_contribution
+```
+
+`performance.return_contribution` uses assets as rows and years as columns.
+Asset rows are chain-linked percentage-point return contributions, and the
+final `Portfolio Return` row is the total investment return for each period.
+
+Correlation helpers return compact, terminal-friendly matrices:
+
+```python
+performance.return_correlation()
+performance.return_correlation(year=2026)
+performance.return_correlation(start="2020-01-01", end="2026-09-25")
+
+performance.volatility_correlation()
+```
+
+Long fund names are shortened in correlation matrices, preferring ticker/data
+symbols when available, so the matrix remains readable in a terminal.
+
+### Current Risk View
+
+`risk_view()` is still available for current-allocation risk analysis:
+
+```python
+risk = portfolio.risk_view(start="2020-01-01")
+risk.summary
+risk.assets
+risk.asset_volatility
+risk.volatility_contribution
+risk.asset_sharpe
+risk.sharpe_contribution
+risk.yearly_risk_contribution
+risk.yearly_portfolio_volatility
+risk.correlation
+```
+
+Risk view uses the current or year-end allocation and historical instrument
+returns. This is different from realized performance, which uses the actual
+historical holdings through time.
+
+### Full Analysis
+
+For a broader object that combines realized performance, current risk,
+attribution, covariance/correlation matrices, and metadata:
+
+```python
+analysis = portfolio.analyze(
+    start="2020-01-01",
+    end="2026-09-19",
+    benchmark="SP500",
+)
+
+analysis.portfolio
+analysis.instruments
+analysis.return_attribution
+analysis.risk_contribution
+analysis.correlation
+analysis.covariance
+analysis.weights
+analysis.metadata
 ```
 
 ### Exposure
@@ -409,6 +535,78 @@ print(portfolio.exposure(by="currency"))
 ```
 
 You can also group by metadata keys you add to instruments, such as `country` or `sector`.
+
+## Interactive Charts
+
+ConvexPM includes lightweight TradingView-style local charts through
+`lightweight-charts`.
+
+### Instrument Chart
+
+Open an empty chart and add instruments by ID, name, ticker, or unique name
+fragment:
+
+```python
+from convexpm import instrument_plot
+
+chart = instrument_plot(start="2026-01-01", curr="EUR")
+chart.add_instrument("REP")
+chart.add_instrument("Chevron")
+chart.relative_chart()
+chart.absolute_chart()
+chart.remove_instrument("REP")
+```
+
+Use `curr="original"` when adding an instrument to keep its native currency:
+
+```python
+chart.add_instrument("Chevron", curr="original")
+```
+
+### Portfolio Chart
+
+Open an interactive portfolio chart:
+
+```python
+portfolio_chart = portfolio.chart(horizon=90, drawdown_tolerance=0.15)
+```
+
+To chart a fund-style NAV per unit, where deposits and withdrawals issue or
+redeem units instead of moving the displayed price, use:
+
+```python
+portfolio_chart = portfolio.chart(horizon=90, drawdown_tolerance=0.15, fund_nav=True)
+```
+
+The chart includes:
+
+- NAV as the main line, or fund-style NAV per unit when `fund_nav=True`.
+- Cumulative net contributions for regular NAV charts.
+- `+/-1 sigma` and `+/-2 sigma` rolling volatility envelope.
+- Drawdown tolerance floor from the NAV high-water mark.
+
+The `horizon` argument sets the rolling volatility window in observations.
+Common values are `30`, `90`, and `365`. The chart is configured at creation
+time; create a new chart if you want a different horizon or drawdown tolerance.
+
+For speed, portfolio charts value the portfolio only on actual market/trade
+observation dates instead of every calendar day.
+
+Legacy portfolio helpers such as `portfolio.stats`, `portfolio.plot_text()`,
+and `portfolio.plot(style="terminal")` have been removed. Use
+`portfolio.performance_view()` for portfolio metrics and `portfolio.chart()`
+for the interactive NAV chart.
+
+## Terminal Display
+
+Portfolio, trade-ledger, performance, risk, and chart-supporting tables use a
+Bloomberg-like blue terminal style in the REPL. Positive numbers render green,
+negative numbers render red, and aggregation rows such as `Portfolio Return`,
+`Portfolio Volatility`, `Portfolio Drawdown`, and `Total` receive a highlighted
+separator.
+
+This styling is generic to ConvexPM's styled DataFrame/Series wrappers; it does
+not globally override pandas display.
 
 ## What-if Scenarios
 
@@ -450,7 +648,7 @@ scenario = portfolio.what_if(
 )
 
 print(scenario.portfolio.nav_history())
-print(scenario.portfolio.performance())
+print(scenario.portfolio.performance_view().summary)
 ```
 
 ### Compare A Scenario
@@ -521,8 +719,9 @@ portfolio = Portfolio(
 
 print(portfolio.holdings())
 print(portfolio.nav_history())
-print(portfolio.performance())
-print(portfolio.risk())
+performance = portfolio.performance_view()
+print(performance.summary)
+print(performance.return_contribution)
 print(portfolio.exposure(by="asset_class"))
 ```
 
@@ -535,87 +734,30 @@ convexpm/
     market_data/     MarketDataStore plus Yahoo and Renta 4 providers
     portfolio/       Holdings and valuation
     analytics/       Returns, performance, risk, and exposure
+    plotting.py       Interactive instrument and portfolio charts
     scenarios/       What-if scenario cloning and comparison
-    utils/           Date helpers
+    utils/           Date and terminal-display helpers
 tests/               Deterministic unit tests
 examples/            Small usage scripts
 data/                Local Parquet data files
 ```
 
-## V1 Limitations
+## Current Limitations
 
 - Only BUY and SELL trades are supported.
 - Holdings are quantity-based.
-- Valuation is currently `quantity * value`.
-- Instruments are assumed to already be in the portfolio base currency.
-- There is no cash ledger yet.
-- There is no tax, broker, lot accounting, or reconciliation system.
-- There are no options, futures, Greeks, optimization, Monte Carlo, web UI, or live market data.
+- Valuation is market-value based and does not include tax lots or realized-gain accounting.
+- FX conversion depends on saved FX market-data rows; missing FX data can still limit valuation.
+- Generated cash settlement legs are supported, but there is no full broker reconciliation system yet.
+- There is no tax, lot accounting, or full reconciliation system.
+- There are no options Greeks, optimization, Monte Carlo, web UI, or live market data.
+- TradingView-style charts are local Python windows, not a hosted web dashboard.
 
 ## Roadmap
 
 Likely V2 improvements:
 
-- Cash ledger and explicit contributions/withdrawals.
-- FX rates and currency conversion.
 - Separate valuation models for options, futures, bonds, and FX forwards.
 - Risk factors and scenario repricing.
-- Broker importers and reconciliation.
+- Broker reconciliation and richer cash accounting.
 - Richer metadata for sector, country, duration, strategy, and account-level reporting.
-
-
-## Realized performance vs current-allocation risk
-
-ConvexPM deliberately separates two different questions:
-
-- `portfolio.performance(start, end)` reconstructs the portfolio actually held through time.
-- `portfolio.current_risk(start, end, benchmark=...)` applies the allocation held at the analysis date to historical instrument returns over the selected lookback.
-- `portfolio.analyze(start, end, benchmark=...)` combines both views with instrument statistics, return attribution, current risk contribution, covariance/correlation matrices, weights, and calculation metadata.
-
-Example:
-
-```python
-analysis = portfolio.analyze(
-    start="2020-01-01",
-    end="2026-09-19",
-    benchmark="SP500",
-)
-
-analysis.portfolio
-analysis.instruments
-analysis.return_attribution
-analysis.risk_contribution
-analysis.correlation
-analysis.covariance
-analysis.weights
-analysis.metadata
-```
-
-A position bought recently contributes to realized return only after it enters the portfolio, while its current-risk estimate can still use a longer market history. Return contribution is expressed in portfolio percentage points; risk contribution is based on current weights and the historical covariance matrix.
-
-V1 aligns instrument histories using the intersection of valid return dates and does not silently fill missing prices.
-
-## Simple Performance and Risk Views
-
-The higher-level view API is intentionally smaller than the full analytics API and is convenient in a REPL or future UI:
-
-```python
-performance = portfolio.performance_view(start="2020-01-01")
-performance.summary
-performance.assets
-performance.yearly_return_contribution
-performance.cumulative_return
-
-risk = portfolio.risk_view(start="2020-01-01")
-risk.summary
-risk.assets
-risk.yearly_risk_contribution
-risk.yearly_portfolio_volatility
-risk.correlation
-```
-
-`performance.yearly_return_contribution` uses assets as rows and calendar years as columns. Asset rows are chain-linked percentage-point return contributions and the final `Portfolio Return` row is the total investment return for each year.
-
-`risk.yearly_risk_contribution` uses the same orientation. Each year uses the portfolio allocation held at that year-end and an expanding historical lookback beginning at `start`. Asset rows are percentage contribution to portfolio volatility; the final `Portfolio Volatility` row is the total annualized volatility.
-
-The performance view reconstructs returns from historical holdings and instrument returns, so the mechanical effect of adding or removing capital is not counted as investment performance. A first-class cash/contribution ledger is still needed before cash balances and contribution reporting are fully modeled.

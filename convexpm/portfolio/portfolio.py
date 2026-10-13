@@ -8,14 +8,12 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
 from convexpm.analytics.current_risk import current_risk as build_current_risk
 from convexpm.analytics.exposure import exposure_by
 from convexpm.analytics.performance import performance_summary
-from convexpm.analytics.returns import cash_settlement_parent_ids, is_external_capital_flow
 from convexpm.analytics.views import performance_view as build_performance_view, risk_view as build_risk_view
 from convexpm.analytics.portfolio_analysis import analyze_portfolio
 from convexpm.analytics.risk import risk_summary
@@ -30,7 +28,7 @@ from convexpm.portfolio.valuation import fx_rate_to_base
 from convexpm.scenarios.scenario import Scenario
 from convexpm.transactions import Trade, TradeLedger, load_trades, save_trades
 from convexpm.utils.dates import DateLike
-from convexpm.utils.terminal_plot import TerminalPlot, terminal_line_plot
+from convexpm.utils.terminal_table import blue_table, terminal_title
 
 PORTFOLIO_METADATA_FILENAME = "portfolio.json"
 PORTFOLIO_TRADES_FILENAME = "trades.parquet"
@@ -54,6 +52,7 @@ class Portfolio:
     trades: list[Trade] | TradeLedger = field(default_factory=list)
     registry: InstrumentRegistry | None = None
     market_data: MarketDataStore | None = None
+    benchmark: str | None = None
     _storage_dir: Path | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -140,6 +139,17 @@ class Portfolio:
         self._ensure_cash_instrument(currency, trade.date)
         cash_side = "SELL" if trade.side == "BUY" else "BUY"
         cash_instrument_id = _cash_instrument_id(currency)
+        metadata = {
+            "source": "cash_ledger",
+            "parent_trade_id": trade.trade_id,
+            "parent_instrument_id": trade.instrument_id,
+            "parent_side": trade.side,
+        }
+        for key in ("concept", "description", "broker_transaction_type", "operation_type", "note"):
+            if trade.metadata.get(key):
+                metadata[key] = trade.metadata[key]
+                break
+
         return Trade(
             trade_id=f"{trade.trade_id}:cash",
             date=trade.date,
@@ -152,12 +162,7 @@ class Portfolio:
             currency=currency,
             account=trade.account,
             tags=[*trade.tags, "cash"] if "cash" not in trade.tags else list(trade.tags),
-            metadata={
-                "source": "cash_ledger",
-                "parent_trade_id": trade.trade_id,
-                "parent_instrument_id": trade.instrument_id,
-                "parent_side": trade.side,
-            },
+            metadata=metadata,
         )
 
     def _ensure_cash_price_for_trade(self, trade: Trade) -> None:
@@ -220,6 +225,10 @@ class Portfolio:
             self.trades.sort(key=lambda item: (item.date, item.trade_id))
         return removed
 
+    def set_benchmark(self, benchmark: str | None) -> None:
+        """Set the default benchmark instrument for performance comparisons."""
+        self.benchmark = benchmark
+
     def save(
         self,
         portfolio_id: str | None = None,
@@ -246,6 +255,7 @@ class Portfolio:
             "version": PORTFOLIO_FORMAT_VERSION,
             "name": self.name,
             "base_currency": self.base_currency,
+            "benchmark": self.benchmark,
         }
         metadata_path = storage_dir / PORTFOLIO_METADATA_FILENAME
         metadata_path.write_text(
@@ -288,6 +298,7 @@ class Portfolio:
             trades=load_trades(storage_dir / PORTFOLIO_TRADES_FILENAME),
             registry=registry if registry is not None else InstrumentRegistry(),
             market_data=market_data if market_data is not None else MarketDataStore(),
+            benchmark=metadata.get("benchmark"),
         )
         portfolio._storage_dir = storage_dir
         return portfolio
@@ -351,9 +362,20 @@ class Portfolio:
         self,
         start: DateLike | None = None,
         end: DateLike | None = None,
+        *,
+        benchmark: str | None = None,
+        risk_free_rate: float = 0.0,
+        periods_per_year: int = 252,
     ):
         """Return the simple realized-performance view used by the product/REPL."""
-        return build_performance_view(self, start=start, end=end)
+        return build_performance_view(
+            self,
+            start=start,
+            end=end,
+            benchmark=benchmark if benchmark is not None else self.benchmark,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
+        )
 
     def current_risk(
         self,
@@ -390,6 +412,12 @@ class Portfolio:
             risk_free_rate=risk_free_rate,
             periods_per_year=periods_per_year,
         )
+
+    def chart(self, **kwargs):
+        """Open an interactive NAV chart with contributions and risk bands."""
+        from convexpm.plotting import portfolio_chart as build_portfolio_chart
+
+        return build_portfolio_chart(self, **kwargs)
 
     def correlation_matrix(
         self,
@@ -538,58 +566,9 @@ class Portfolio:
         summary["weight"] = valued / total if abs(total) > 1e-12 else pd.NA
         return summary.sort_values("market_value", ascending=False, na_position="last").reset_index(drop=True)
 
-    @property
-    def stats(self) -> "PortfolioStats":
-        """Interactive portfolio statistics."""
-        return PortfolioStats(self)
-
-    def plot(self, *, style: str = "bloomberg", show: bool = True, **kwargs: Any) -> Any:
-        """Plot portfolio NAV history. Requires matplotlib."""
-        if style in {"terminal", "text", "repl"}:
-            return self.plot_text(**kwargs)
-
-        import matplotlib.pyplot as plt
-
-        nav = self.nav_history(skip_missing_prices=True)
-        if nav.empty:
-            raise ValueError("Cannot plot an empty portfolio NAV history")
-        series = nav.set_index("date")["nav"].rename(self.name)
-        title = kwargs.pop("title", f"{self.name} NAV")
-        if style == "bloomberg":
-            kwargs.setdefault("figsize", (12, 5))
-            kwargs.setdefault("color", "#ffb000")
-            ax = series.plot(title=title, grid=False, **kwargs)
-            figure = ax.get_figure()
-            figure.patch.set_facecolor("#050505")
-            ax.set_facecolor("#050505")
-            ax.tick_params(colors="#f2f2f2")
-            ax.title.set_color("#f2f2f2")
-            ax.yaxis.label.set_color("#f2f2f2")
-            ax.xaxis.label.set_color("#f2f2f2")
-            for spine in ax.spines.values():
-                spine.set_color("#5a5a5a")
-            ax.grid(True, color="#333333", linewidth=0.6)
-        else:
-            ax = series.plot(title=title, grid=kwargs.pop("grid", True), **kwargs)
-        ax.set_xlabel("")
-        if show:
-            plt.show()
-        return ax
-
-    def plot_text(self, *, width: int = 80, height: int = 16, title: str | None = None) -> TerminalPlot:
-        """Return a terminal-native NAV chart for REPL display."""
-        nav = self.nav_history(skip_missing_prices=True)
-        series = nav.set_index("date")["nav"].rename(self.name) if not nav.empty else pd.Series(dtype=float)
-        return terminal_line_plot(
-            series,
-            title=title or f"{self.name} NAV",
-            width=width,
-            height=height,
-        )
-
     def __repr__(self) -> str:
         summary = self.summary()
-        header = f"{self.name} ({self.base_currency})"
+        header = terminal_title(self.name, f"BASE {self.base_currency}")
         if summary.empty:
             return f"{header}\nNo holdings"
         total = pd.to_numeric(summary["market_value"], errors="coerce").sum()
@@ -610,7 +589,13 @@ class Portfolio:
         display["price"] = price * fx_rate
         display["weight"] = pd.to_numeric(display["weight"], errors="coerce") * 100.0
         display["currency"] = self.base_currency
-        return f"{header}\nNAV: {total:,.2f} {self.base_currency}\n{display.to_string(index=False)}"
+        return "\n".join(
+            [
+                header,
+                f"\033[1m\033[38;5;39mNAV: {total:,.2f} {self.base_currency}\033[0m",
+                blue_table(display, index=False),
+            ]
+        )
 
     def _repr_html_(self) -> str:
         summary = self.summary()
@@ -628,87 +613,6 @@ class Portfolio:
         if self.trades:
             candidates.append(max(trade.date for trade in self.trades))
         return max(candidates) if candidates else date.today()
-
-
-class PortfolioStats:
-    """Callable stats accessor for a portfolio."""
-
-    def __init__(self, portfolio: Portfolio) -> None:
-        self.portfolio = portfolio
-
-    @property
-    def summary(self) -> pd.Series:
-        nav = self.portfolio.nav_history(skip_missing_prices=True)
-        return _stats_for_nav(
-            nav,
-            portfolio=self.portfolio,
-            risk_free_rate=0.0,
-            periods_per_year=252,
-        )
-
-    def by_period(
-        self,
-        periods: int | None = None,
-        *,
-        freq: str = "Y",
-        risk_free_rate: float = 0.0,
-        periods_per_year: int = 252,
-    ) -> pd.DataFrame:
-        nav = self.portfolio.nav_history(skip_missing_prices=True)
-        if nav.empty:
-            return pd.DataFrame()
-        freq = _normalize_stats_freq(freq)
-        nav = nav.sort_values("date")
-        if periods is not None:
-            last_date = nav["date"].max()
-            nav = nav.loc[nav["date"] > last_date - _period_offset(periods, freq)]
-        grouped = nav.groupby(nav["date"].dt.to_period(freq), sort=True)
-        columns = {
-            str(period): _stats_for_nav(
-                group,
-                portfolio=self.portfolio,
-                risk_free_rate=risk_free_rate,
-                periods_per_year=periods_per_year,
-            )
-            for period, group in grouped
-        }
-        columns["All"] = _stats_for_nav(
-            nav,
-            portfolio=self.portfolio,
-            risk_free_rate=risk_free_rate,
-            periods_per_year=periods_per_year,
-        )
-        return pd.DataFrame(columns)
-
-    def __call__(
-        self,
-        periods: int | None = None,
-        *,
-        freq: str = "Y",
-        risk_free_rate: float = 0.0,
-        periods_per_year: int = 252,
-    ) -> pd.DataFrame:
-        return self.by_period(
-            periods=periods,
-            freq=freq,
-            risk_free_rate=risk_free_rate,
-            periods_per_year=periods_per_year,
-        )
-
-    def __getitem__(self, key: str) -> Any:
-        return self.summary[key]
-
-    def __repr__(self) -> str:
-        table = self.by_period()
-        if table.empty:
-            return self.summary.to_string()
-        return table.to_string()
-
-    def _repr_html_(self) -> str:
-        table = self.by_period()
-        if table.empty:
-            return self.summary.to_frame("value")._repr_html_()
-        return table._repr_html_()
 
 
 def _portfolio_dir(portfolio_id: str, root: str | Path) -> Path:
@@ -729,6 +633,7 @@ def _trade_identity_key(trade: Trade) -> tuple[object, ...]:
     broker_type = str(
         trade.metadata.get("broker_transaction_type")
         or trade.metadata.get("operation_type")
+        or trade.metadata.get("cash_flow_type")
         or ""
     ).lower()
     return (
@@ -743,6 +648,7 @@ def _trade_identity_key(trade: Trade) -> tuple[object, ...]:
         _rounded_trade_number(trade.amount),
         _rounded_trade_number(trade.value_per_unit),
         _rounded_trade_number(trade.fees),
+        _trade_metadata_identity(trade, source),
     )
 
 
@@ -755,6 +661,12 @@ def _trade_instrument_identity(trade: Trade, source: str) -> str:
         if isinstance(fund_name, str) and fund_name.strip():
             return _renta4_fallback_id(fund_name)
     return trade.instrument_id
+
+
+def _trade_metadata_identity(trade: Trade, source: str) -> object:
+    if source == "renta4_cash":
+        return _rounded_trade_number(trade.metadata.get("balance"))
+    return None
 
 
 def _cash_instrument_id(currency: str) -> str:
@@ -774,6 +686,10 @@ def _trade_amount_in_trade_currency(trade: Trade) -> float | None:
 
 
 def _upgrade_duplicate_trade(existing: Trade, incoming: Trade) -> None:
+    for key, value in incoming.metadata.items():
+        if value is not None and key not in existing.metadata:
+            existing.metadata[key] = value
+
     if not _is_renta4_canonical_upgrade(existing, incoming):
         return
     previous_ids = list(existing.metadata.get("previous_instrument_ids") or [])
@@ -816,144 +732,3 @@ def _rounded_trade_number(value: float | None) -> float | None:
     return round(float(value), 8)
 
 
-def _stats_for_nav(
-    nav: pd.DataFrame,
-    *,
-    portfolio: Portfolio | None = None,
-    risk_free_rate: float = 0.0,
-    periods_per_year: int = 252,
-) -> pd.Series:
-    if nav.empty:
-        return pd.Series(dtype=object)
-    nav = nav.sort_values("date")
-    values = nav["nav"]
-    returns = values.pct_change().dropna()
-    volatility = returns.std()
-    excess_returns = returns - (risk_free_rate / periods_per_year)
-    sharpe = (
-        (excess_returns.mean() / volatility) * (periods_per_year**0.5)
-        if not returns.empty and volatility and pd.notna(volatility)
-        else pd.NA
-    )
-    first_date = pd.Timestamp(nav["date"].min()).date()
-    last_date = pd.Timestamp(nav["date"].max()).date()
-    nav_total_return = (values.iloc[-1] / values.iloc[0] - 1) if values.iloc[0] else pd.NA
-    stats = {
-        "observations": len(nav),
-        "first_date": first_date,
-        "last_date": last_date,
-        "first_nav": values.iloc[0],
-        "last_nav": values.iloc[-1],
-        "min_nav": values.min(),
-        "max_nav": values.max(),
-        "total_return": nav_total_return,
-        "nav_total_return": nav_total_return,
-        "asset_return": pd.NA,
-        "capital_inflows": pd.NA,
-        "capital_outflows": pd.NA,
-        "net_capital_flow": pd.NA,
-        "mean_return": returns.mean() if not returns.empty else pd.NA,
-        "volatility": volatility if not returns.empty else pd.NA,
-        "sharpe": sharpe,
-    }
-    if portfolio is not None:
-        stats.update(_portfolio_flow_and_asset_stats(portfolio, first_date=first_date, last_date=last_date))
-    return pd.Series(stats)
-
-
-def _portfolio_flow_and_asset_stats(
-    portfolio: Portfolio,
-    *,
-    first_date: date,
-    last_date: date,
-) -> dict[str, object]:
-    inflows = 0.0
-    outflows = 0.0
-    settlement_parent_ids = cash_settlement_parent_ids(portfolio.trades)
-    for trade in portfolio.trades:
-        if trade.date < first_date or trade.date > last_date:
-            continue
-        if not is_external_capital_flow(trade, settlement_parent_ids=settlement_parent_ids):
-            continue
-        amount = _trade_amount_in_base(portfolio, trade)
-        if amount is None:
-            continue
-        if trade.side == "BUY":
-            inflows += amount + float(trade.fees)
-        else:
-            outflows += max(amount - float(trade.fees), 0.0)
-
-    asset_return: object = pd.NA
-    try:
-        asset_return = float(
-            portfolio.performance_view(start=first_date, end=last_date).summary[
-                "portfolio_return_ex_cash_flows (%)"
-            ]
-        ) / 100.0
-    except (KeyError, ValueError, ZeroDivisionError):
-        pass
-
-    return {
-        "asset_return": asset_return,
-        "capital_inflows": inflows,
-        "capital_outflows": outflows,
-        "net_capital_flow": inflows - outflows,
-    }
-
-
-def _trade_amount_in_base(portfolio: Portfolio, trade: Trade) -> float | None:
-    amount = trade.amount
-    if amount is None and trade.quantity is not None and trade.value_per_unit is not None:
-        amount = float(trade.quantity) * float(trade.value_per_unit)
-    if amount is None and trade.quantity is not None:
-        try:
-            amount = float(trade.quantity) * float(portfolio.market_data.get_value(trade.instrument_id, trade.date))
-        except KeyError:
-            return None
-    if amount is None:
-        return None
-
-    currency = (trade.currency or portfolio.base_currency).upper()
-    if currency == portfolio.base_currency:
-        return float(amount)
-    try:
-        fx_rate, _ = fx_rate_to_base(currency, portfolio.base_currency, portfolio.market_data, trade.date)
-    except KeyError:
-        return float(amount)
-    return float(amount) * float(fx_rate)
-
-
-def _normalize_stats_freq(freq: str) -> str:
-    normalized = freq.strip().upper()
-    aliases = {
-        "Y": "Y",
-        "A": "Y",
-        "ANNUAL": "Y",
-        "YEAR": "Y",
-        "YEARLY": "Y",
-        "YEARS": "Y",
-        "Q": "Q",
-        "QUARTER": "Q",
-        "QUARTERLY": "Q",
-        "QUARTERS": "Q",
-        "M": "M",
-        "MONTH": "M",
-        "MONTHLY": "M",
-        "MONTHS": "M",
-    }
-    try:
-        return aliases[normalized]
-    except KeyError as exc:
-        raise ValueError("freq must be one of 'Y', 'Q', or 'M'") from exc
-
-
-def _period_offset(periods: int, freq: str) -> pd.DateOffset:
-    if periods <= 0:
-        raise ValueError("periods must be positive")
-    if freq == "Y":
-        return pd.DateOffset(years=periods)
-    if freq == "Q":
-        return pd.DateOffset(months=periods * 3)
-    if freq == "M":
-        return pd.DateOffset(months=periods)
-    raise ValueError("freq must be one of 'Y', 'Q', or 'M'")

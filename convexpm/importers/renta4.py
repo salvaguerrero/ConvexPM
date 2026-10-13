@@ -17,6 +17,7 @@ from convexpm.market_data import MARKET_DATA_COLUMNS, Renta4CSVProvider
 from convexpm.transactions import Trade
 
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
+R4_CASH_INSTRUMENT_ID = "EUR_CASH"
 
 
 @dataclass(slots=True)
@@ -64,6 +65,7 @@ class Renta4ImportResult:
     instruments: list[Instrument]
     trades: list[Trade]
     raw_transactions: pd.DataFrame
+    cash_transactions: pd.DataFrame
     morningstar_reports: list[MorningstarReport]
 
 
@@ -94,20 +96,33 @@ class Renta4ImportParser:
                 match.metadata["morningstar"] = report.to_metadata()
 
         all_trades: list[Trade] = []
+        cash_trades: list[Trade] = []
         raw_frames: list[pd.DataFrame] = []
+        cash_frames: list[pd.DataFrame] = []
         instruments_for_matching = list(instruments_by_id.values())
         name_map = _instrument_name_map(instruments_for_matching)
         for xls_path in sorted(root.glob("*.xls")):
-            trades, raw = self.parse_transactions_xls(
-                xls_path,
-                instrument_name_map=name_map,
-                instruments=instruments_for_matching,
-            )
-            all_trades.extend(trades)
-            raw_frames.append(raw)
-            _record_transaction_aliases(raw, instruments_by_id)
-            for instrument in _fallback_instruments_from_transactions(raw, known_ids=set(instruments_by_id)):
-                instruments_by_id[instrument.instrument_id] = instrument
+            excel = pd.ExcelFile(xls_path)
+            if "Operaciones" in excel.sheet_names:
+                trades, raw = self.parse_transactions_xls(
+                    xls_path,
+                    instrument_name_map=name_map,
+                    instruments=instruments_for_matching,
+                )
+                all_trades.extend(trades)
+                raw_frames.append(raw)
+                _record_transaction_aliases(raw, instruments_by_id)
+                for instrument in _fallback_instruments_from_transactions(raw, known_ids=set(instruments_by_id)):
+                    instruments_by_id[instrument.instrument_id] = instrument
+            if "Saldo en Divisa" in excel.sheet_names:
+                parsed_cash_trades, cash_raw = self.parse_cash_xls(xls_path)
+                cash_trades.extend(parsed_cash_trades)
+                cash_frames.append(cash_raw)
+
+        if cash_trades:
+            for trade in all_trades:
+                if str(trade.metadata.get("source") or "") == self.source:
+                    trade.metadata["cash_ledger_source"] = "renta4_saldo_en_divisa"
 
         market_data = (
             pd.concat(market_frames, ignore_index=True)
@@ -116,12 +131,20 @@ class Renta4ImportParser:
         )
         market_data = _sync_market_data_currencies(market_data, instruments_by_id)
         raw_transactions = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame()
+        cash_transactions = pd.concat(cash_frames, ignore_index=True) if cash_frames else pd.DataFrame()
+        if not cash_transactions.empty:
+            cash_transactions = cash_transactions.drop_duplicates(
+                subset=["date", "concept", "movement", "balance", "cash_flow_type"],
+                keep="first",
+            ).sort_values(["date", "source_row"]).reset_index(drop=True)
+        trades = _dedupe_trades([*all_trades, *cash_trades])
 
         return Renta4ImportResult(
             market_data=market_data,
             instruments=[instruments_by_id[key] for key in sorted(instruments_by_id)],
-            trades=sorted(all_trades, key=lambda trade: (trade.date, trade.instrument_id, trade.trade_id)),
+            trades=sorted(trades, key=lambda trade: (trade.date, trade.instrument_id, trade.trade_id)),
             raw_transactions=raw_transactions,
+            cash_transactions=cash_transactions,
             morningstar_reports=reports,
         )
 
@@ -140,6 +163,48 @@ class Renta4ImportParser:
             instrument_name_map=instrument_name_map,
             instruments=instruments,
         )
+
+    def parse_cash_xls(self, path: str | Path) -> tuple[list[Trade], pd.DataFrame]:
+        """Parse Renta 4 ``Saldo en Divisa`` cash-ledger XLS exports."""
+        df = pd.read_excel(path, sheet_name="Saldo en Divisa", header=None)
+        return self.parse_cash_dataframe(df, source_path=str(path))
+
+    def parse_cash_dataframe(
+        self,
+        df: pd.DataFrame,
+        *,
+        source_path: str | None = None,
+    ) -> tuple[list[Trade], pd.DataFrame]:
+        """Parse the Renta 4 cash ledger from the ``Saldo en Divisa`` sheet."""
+        header_row = _find_cash_header_row(df)
+        rows: list[dict[str, Any]] = []
+        for row_index in range(header_row + 1, len(df)):
+            row = df.iloc[row_index]
+            movement_date = _parse_date(row.iloc[0])
+            concept = _clean_text(row.iloc[1])
+            movement = _parse_number(row.iloc[2])
+            balance = _parse_number(row.iloc[3])
+            if movement_date is None or movement is None:
+                continue
+            cash_flow_type = _renta4_cash_flow_type(concept)
+            if cash_flow_type in {"opening", "fund_buy", "fund_sell"}:
+                continue
+            source_row = int(row_index) + 1
+            rows.append(
+                {
+                    "date": pd.Timestamp(movement_date),
+                    "concept": concept,
+                    "movement": movement,
+                    "balance": balance,
+                    "cash_flow_type": cash_flow_type,
+                    "source_path": source_path,
+                    "source_row": source_row,
+                }
+            )
+
+        raw = pd.DataFrame(rows)
+        trades = [_renta4_cash_trade_from_row(row) for _, row in raw.iterrows()]
+        return trades, raw
 
     def parse_transactions_dataframe(
         self,
@@ -283,6 +348,44 @@ def _renta4_trade_from_row(row: pd.Series) -> Trade:
     )
 
 
+def _renta4_cash_trade_from_row(row: pd.Series) -> Trade:
+    movement = float(row["movement"])
+    amount = abs(movement)
+    balance = _none_if_na(row.get("balance"))
+    metadata = {
+        "source": "renta4_cash",
+        "concept": row["concept"],
+        "cash_flow_type": row["cash_flow_type"],
+        "movement": movement,
+        "balance": balance,
+        "source_path": row.get("source_path"),
+        "source_row": int(row["source_row"]),
+    }
+    return Trade(
+        trade_id=_stable_trade_id(
+            "renta4-cash",
+            [
+                str(row["date"].date()),
+                str(row["cash_flow_type"]),
+                str(row["concept"]),
+                _stable_number(movement),
+                _stable_number(balance if isinstance(balance, (int, float)) else None),
+            ],
+        ),
+        date=row["date"].date(),
+        instrument_id=R4_CASH_INSTRUMENT_ID,
+        side="BUY" if movement > 0 else "SELL",
+        quantity=amount,
+        amount=amount,
+        value_per_unit=1.0,
+        fees=0.0,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4", "cash"],
+        metadata=metadata,
+    )
+
+
 def _stable_trade_id(source: str, values: list[str]) -> str:
     digest = hashlib.sha1("|".join(values).encode("utf-8")).hexdigest()[:12]
     return f"{source}-{digest}"
@@ -294,11 +397,26 @@ def _stable_number(value: float | None) -> str:
     return f"{float(value):.8f}"
 
 
+def _dedupe_trades(trades: Iterable[Trade]) -> list[Trade]:
+    by_id: dict[str, Trade] = {}
+    for trade in trades:
+        by_id.setdefault(trade.trade_id, trade)
+    return list(by_id.values())
+
+
 def _find_header_row(df: pd.DataFrame) -> int:
     for index, value in enumerate(df.iloc[:, 0].tolist()):
         if _clean_text(value).lower() == "fecha":
             return index
     raise ValueError("Could not find Renta 4 transaction header row")
+
+
+def _find_cash_header_row(df: pd.DataFrame) -> int:
+    for index in range(len(df)):
+        labels = [_clean_text(value).lower() for value in df.iloc[index, :4].tolist()]
+        if labels[:4] == ["fecha", "concepto", "movimientos", "saldo"]:
+            return index
+    raise ValueError("Could not find Renta 4 cash-ledger header row")
 
 
 def _renta4_side(operation_type: str) -> str | None:
@@ -308,6 +426,27 @@ def _renta4_side(operation_type: str) -> str | None:
     if "REEMBOLSO" in normalized or "SALIDA" in normalized:
         return "SELL"
     return None
+
+
+def _renta4_cash_flow_type(concept: str) -> str:
+    normalized = _strip_accents(concept).upper()
+    if normalized.startswith("TRANSF. RECIBIDA"):
+        return "transfer_in"
+    if normalized.startswith("TRANSF. EMITIDA"):
+        return "transfer_out"
+    if normalized.startswith("COMPRA DE"):
+        return "fund_buy"
+    if normalized.startswith("VENTA DE"):
+        return "fund_sell"
+    if normalized.startswith("RETENCION"):
+        return "withholding"
+    if normalized.startswith("COMISION"):
+        return "fee"
+    if normalized.startswith("IVA"):
+        return "tax"
+    if normalized.startswith("ASIENTO DE APERTURA"):
+        return "opening"
+    return "other"
 
 
 def _instrument_name_map(instruments: Iterable[Instrument]) -> dict[str, str]:

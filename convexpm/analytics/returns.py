@@ -252,7 +252,12 @@ def is_external_capital_flow(
     if source == "ibkr_cash":
         broker_type = str(trade.metadata.get("broker_transaction_type") or "").strip().lower()
         return broker_type in {"deposit", "withdrawal"}
+    if source == "renta4_cash":
+        cash_flow_type = str(trade.metadata.get("cash_flow_type") or "").strip().lower()
+        return cash_flow_type in {"transfer_in", "transfer_out"}
     if source == "renta4":
+        if trade.metadata.get("cash_ledger_source"):
+            return False
         operation_type = str(trade.metadata.get("operation_type") or "").strip().lower()
         if operation_type.startswith(("t. entrada", "t. salida")):
             return False

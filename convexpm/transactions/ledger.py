@@ -9,6 +9,7 @@ import pandas as pd
 
 from convexpm.transactions.repository import trades_to_dataframe
 from convexpm.transactions.trade import Trade
+from convexpm.utils.terminal_table import blue_table, terminal_title
 
 if TYPE_CHECKING:
     from convexpm.instruments import InstrumentRegistry
@@ -82,6 +83,11 @@ class TradeLedger(Sequence[Trade]):
             "price_without_fee",
             df.apply(_price_without_fee, axis=1),
         )
+        df.insert(
+            df.columns.get_loc("account") + 1,
+            "note",
+            pd.Series([_trade_note(trade) for trade in self._trades], dtype=object),
+        )
         df = df.set_index("trade_id", drop=False)
         df.index.name = "trade_id"
         return df
@@ -100,6 +106,7 @@ class TradeLedger(Sequence[Trade]):
         data["instrument_name"] = self._trade_instrument_name(trade)
         data["price"] = _amount_per_quantity(data)
         data["price_without_fee"] = _price_without_fee(data)
+        data["note"] = _trade_note(trade)
         metadata = data.pop("metadata", {})
         detail = pd.Series(data)
         if metadata:
@@ -138,11 +145,17 @@ class TradeLedger(Sequence[Trade]):
                 "fees",
                 "currency",
                 "account",
+                "note",
             ],
         ].copy()
         display.index = range(1, len(display) + 1)
         display.index.name = "n"
-        return display.to_string()
+        return "\n".join(
+            [
+                terminal_title("TRADES", f"{len(display)} rows"),
+                blue_table(display, index=True, reverse_numeric_columns={"fees"}),
+            ]
+        )
 
     def _repr_html_(self) -> str:
         df = self.to_dataframe()
@@ -183,3 +196,18 @@ def _price_without_fee(row: Any) -> float | None:
     if not pd.isna(value_per_unit):
         return float(value_per_unit)
     return _amount_per_quantity(row)
+
+
+def _trade_note(trade: Trade) -> str | None:
+    metadata = trade.metadata or {}
+    candidates = [
+        metadata.get("concept"),
+        metadata.get("description"),
+        metadata.get("broker_transaction_type"),
+        metadata.get("operation_type"),
+        metadata.get("note"),
+    ]
+    for value in candidates:
+        if value is not None and not pd.isna(value) and str(value).strip():
+            return str(value).strip()
+    return None

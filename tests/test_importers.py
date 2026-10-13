@@ -9,6 +9,7 @@ from convexpm.importers.renta4 import (
     _record_transaction_aliases,
     _sync_market_data_currencies,
 )
+from convexpm.analytics.returns import is_external_capital_flow
 from convexpm.instruments import Instrument
 
 
@@ -120,6 +121,36 @@ def test_renta4_transaction_parser_maps_fund_names_to_isin_and_costs():
     assert trades[0].fees == pytest.approx(1.5)
     assert trades[1].side == "SELL"
     assert trades[1].fees == pytest.approx(0.91)
+
+
+def test_renta4_cash_parser_reads_saldo_en_divisa_and_classifies_external_flows():
+    df = pd.DataFrame(
+        [
+            ["client", None, "Código Bolsa", "OW1877"],
+            [None, None, None, None],
+            ["MOVIMIENTOS DEL PERIODO EN EUROS", None, None, None],
+            ["FECHA", "CONCEPTO", "MOVIMIENTOS", "SALDO"],
+            [None, "SALDO ANTERIOR", None, 0],
+            ["24/08/2026", "TRANSF. RECIBIDA DE Salvador Guerrero Garcia", 3000, 3000],
+            ["24/08/2026", "COMPRA DE RENTA 4 FONCUENTA AHORRO, FI", -3000, 0],
+            ["22/09/2026", "VENTA DE RENTA 4 FONCUENTA AHORRO, FI", 5000, 5000],
+            ["24/09/2026", "COMPRA DE BGF WORLD ENERGY A2 EUR HEDGED", -5000, 0],
+            ["09/10/2026", "COMISION CUSTODIA IIC JUL-SEP 2026", -2.76, -2.76],
+            [None, "SALDO FINAL", None, 0],
+        ]
+    )
+
+    trades, raw = Renta4ImportParser().parse_cash_dataframe(df, source_path="extracto.xls")
+
+    assert raw["cash_flow_type"].tolist() == ["transfer_in", "fee"]
+    assert [trade.instrument_id for trade in trades] == ["EUR_CASH"] * 2
+    assert [trade.side for trade in trades] == ["BUY", "SELL"]
+    assert [trade.amount for trade in trades] == [
+        pytest.approx(3000),
+        pytest.approx(2.76),
+    ]
+    assert is_external_capital_flow(trades[0])
+    assert not is_external_capital_flow(trades[1])
 
 
 def test_renta4_trade_id_survives_later_isin_resolution():

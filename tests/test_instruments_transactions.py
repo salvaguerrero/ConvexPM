@@ -1,6 +1,6 @@
 from datetime import date
 
-from convexpm import Instrument, InstrumentRegistry, Portfolio, Trade
+from convexpm import Instrument, InstrumentRegistry, MarketDataStore, Portfolio, Trade
 from convexpm.transactions import load_trades, save_trades
 
 
@@ -198,7 +198,7 @@ def test_portfolio_add_trades_is_idempotent():
     assert len(portfolio.trades) == 1
 
 
-def test_portfolio_add_trades_can_create_double_entry_cash_leg():
+def test_portfolio_add_trades_can_create_double_entry_cash_leg(tmp_path):
     trade = Trade(
         trade_id="gold-buy",
         date=date(2027, 7, 3),
@@ -211,8 +211,11 @@ def test_portfolio_add_trades_can_create_double_entry_cash_leg():
         currency="EUR",
         account="manual",
         tags=["manual"],
+        metadata={"concept": "Gold order"},
     )
-    portfolio = Portfolio(name="Main", base_currency="EUR")
+    registry = InstrumentRegistry(tmp_path / "instruments.parquet", auto_load=False)
+    store = MarketDataStore(tmp_path / "market_data.parquet", registry=registry)
+    portfolio = Portfolio(name="Main", base_currency="EUR", registry=registry, market_data=store)
 
     assert portfolio.add_trades([trade], cash_ledger=True) == 2
     assert portfolio.add_trades([trade], cash_ledger=True) == 0
@@ -224,6 +227,7 @@ def test_portfolio_add_trades_can_create_double_entry_cash_leg():
     assert cash_leg.quantity == 931.5
     assert cash_leg.amount == 931.5
     assert cash_leg.metadata["parent_trade_id"] == "gold-buy"
+    assert cash_leg.metadata["concept"] == "Gold order"
     assert "EUR_CASH" in portfolio.registry
     assert portfolio.market_data.get_value("EUR_CASH", date(2027, 7, 3), exact=True) == 1.0
     assert portfolio.holdings(date(2027, 7, 3)) == {"EUR_CASH": -931.5, "GC=F": 0.5}
@@ -309,6 +313,87 @@ def test_portfolio_add_trades_upgrades_renta4_generated_id_to_isin():
     assert upgraded.metadata["previous_instrument_ids"] == ["R4_BNP_USD_MONEY_MARKET_C_USD_ACC"]
 
 
+def test_portfolio_add_trades_updates_duplicate_renta4_cash_ledger_metadata():
+    existing = Trade(
+        trade_id="same-id",
+        date=date(2026, 8, 24),
+        instrument_id="R4_RENTA_4_FONCUENTA_AHORRO_FI",
+        side="BUY",
+        quantity=275.928698,
+        amount=3000,
+        value_per_unit=10.87,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4"],
+        metadata={"source": "renta4", "operation_type": "SUSCRIPCIÓN"},
+    )
+    incoming = Trade(
+        trade_id="same-id",
+        date=date(2026, 8, 24),
+        instrument_id="R4_RENTA_4_FONCUENTA_AHORRO_FI",
+        side="BUY",
+        quantity=275.928698,
+        amount=3000,
+        value_per_unit=10.87,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4"],
+        metadata={
+            "source": "renta4",
+            "operation_type": "SUSCRIPCIÓN",
+            "cash_ledger_source": "renta4_saldo_en_divisa",
+        },
+    )
+    portfolio = Portfolio(name="Main", base_currency="EUR", trades=[existing])
+
+    assert portfolio.add_trades([incoming]) == 0
+    assert len(portfolio.trades) == 1
+    assert list(portfolio.trades)[0].metadata["cash_ledger_source"] == "renta4_saldo_en_divisa"
+
+
+def test_portfolio_add_trades_keeps_distinct_same_day_renta4_cash_rows():
+    first = Trade(
+        trade_id="cash-1",
+        date=date(2026, 3, 25),
+        instrument_id="EUR_CASH",
+        side="BUY",
+        quantity=1000,
+        amount=1000,
+        value_per_unit=1,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4", "cash"],
+        metadata={
+            "source": "renta4_cash",
+            "cash_flow_type": "transfer_in",
+            "concept": "TRANSF. RECIBIDA DE SALVADOR GUERRERO GARCIA",
+            "balance": 1000,
+        },
+    )
+    second = Trade(
+        trade_id="cash-2",
+        date=date(2026, 3, 25),
+        instrument_id="EUR_CASH",
+        side="BUY",
+        quantity=1000,
+        amount=1000,
+        value_per_unit=1,
+        currency="EUR",
+        account="renta4",
+        tags=["renta4", "cash"],
+        metadata={
+            "source": "renta4_cash",
+            "cash_flow_type": "transfer_in",
+            "concept": "TRANSF. RECIBIDA DE Salvador Guerrero Garcia",
+            "balance": 2000,
+        },
+    )
+    portfolio = Portfolio(name="Main", base_currency="EUR", trades=[first])
+
+    assert portfolio.add_trades([second]) == 1
+    assert len(portfolio.trades) == 2
+
+
 def test_portfolio_deduplicate_trades_removes_existing_duplicates():
     first = Trade(
         trade_id="old-id",
@@ -363,6 +448,7 @@ def test_portfolio_trades_ledger_detail_and_delete():
             amount=300,
             value_per_unit=150,
             fees=1,
+            metadata={"description": "HAFN Dividend"},
         ),
         Trade(
             trade_id="t2",
@@ -378,14 +464,17 @@ def test_portfolio_trades_ledger_detail_and_delete():
     assert portfolio.trades.to_dataframe()["instrument_name"].tolist() == ["Apple", None]
     assert portfolio.trades.to_dataframe()["price"].tolist()[0] == 150
     assert portfolio.trades.to_dataframe()["price_without_fee"].tolist()[0] == 150
+    assert portfolio.trades.to_dataframe()["note"].tolist() == ["HAFN Dividend", None]
     assert portfolio.trades[1]["trade_id"] == "t1"
     assert portfolio.trades[1]["instrument_name"] == "Apple"
     assert portfolio.trades[1]["price"] == 150
     assert portfolio.trades[1]["price_without_fee"] == 150
+    assert portfolio.trades[1]["note"] == "HAFN Dividend"
     assert portfolio.trades["instrument_id"].tolist() == ["AAPL", "REP"]
     assert portfolio.trades["instrument_name"].tolist() == ["Apple", None]
     assert portfolio.trades["price"].tolist()[0] == 150
     assert portfolio.trades["price_without_fee"].tolist()[0] == 150
+    assert portfolio.trades["note"].tolist() == ["HAFN Dividend", None]
     assert portfolio.trades.to_dataframe().index.tolist() == ["t1", "t2"]
     display = repr(portfolio.trades)
     assert "trade_id" not in display
