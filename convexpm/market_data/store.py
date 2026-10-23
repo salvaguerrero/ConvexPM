@@ -10,7 +10,6 @@ import pandas as pd
 
 from convexpm.instruments import Instrument, InstrumentRegistry
 from convexpm.utils.dates import DateLike, to_timestamp
-from convexpm.utils.terminal_plot import TerminalPlot, terminal_line_plot
 
 MARKET_DATA_COLUMNS = ["date", "instrument_id", "value", "currency", "value_type", "source"]
 
@@ -350,44 +349,6 @@ class InstrumentMarketData:
         if history.empty:
             return pd.Series(dtype=float, name=self.instrument_id)
         return history.set_index("date")["value"].rename(self.instrument_id)
-
-    def plot(self, *, style: str = "bloomberg", show: bool = True, **kwargs: Any) -> Any:
-        """Plot saved values. Requires matplotlib."""
-        if style in {"terminal", "text", "repl"}:
-            return self.plot_text(**kwargs)
-
-        import matplotlib.pyplot as plt
-
-        title = kwargs.pop("title", f"{self.instrument_id} price / NAV")
-        if style == "bloomberg":
-            kwargs.setdefault("figsize", (12, 5))
-            kwargs.setdefault("color", "#ffb000")
-            ax = self.prices.plot(title=title, grid=False, **kwargs)
-            figure = ax.get_figure()
-            figure.patch.set_facecolor("#050505")
-            ax.set_facecolor("#050505")
-            ax.tick_params(colors="#f2f2f2")
-            ax.title.set_color("#f2f2f2")
-            ax.yaxis.label.set_color("#f2f2f2")
-            ax.xaxis.label.set_color("#f2f2f2")
-            for spine in ax.spines.values():
-                spine.set_color("#5a5a5a")
-            ax.grid(True, color="#333333", linewidth=0.6)
-        else:
-            ax = self.prices.plot(title=title, grid=kwargs.pop("grid", True), **kwargs)
-        ax.set_xlabel("")
-        if show:
-            plt.show()
-        return ax
-
-    def plot_text(self, *, width: int = 80, height: int = 16, title: str | None = None) -> TerminalPlot:
-        """Return a terminal-native text plot for REPL display."""
-        return terminal_line_plot(
-            self.prices,
-            title=title or f"{self.instrument_id} price / NAV",
-            width=width,
-            height=height,
-        )
 
     def returns(self) -> pd.Series:
         """Saved-value percentage returns."""

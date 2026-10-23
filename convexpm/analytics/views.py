@@ -56,6 +56,7 @@ class PerformanceViewResult:
         return styled_dataframe(
             _compact_matrix_from_ids(self._portfolio, returns.corr().fillna(0.0)),
             "RETURN CORRELATION",
+            subtitle=_correlation_date_range(returns),
             max_col_width=14,
             numeric_precision=2,
         )
@@ -72,6 +73,7 @@ class PerformanceViewResult:
         return styled_dataframe(
             _compact_matrix_from_ids(self._portfolio, returns.corr().fillna(0.0)),
             "VOLATILITY CORRELATION",
+            subtitle=_correlation_date_range(returns),
             max_col_width=14,
             numeric_precision=2,
         )
@@ -575,6 +577,14 @@ def _percentage_matrix(df: pd.DataFrame) -> pd.DataFrame:
     result = df.apply(pd.to_numeric, errors="coerce") * 100.0
     result.columns = [f"{column} (%)" for column in result.columns]
     return result
+
+
+def _correlation_date_range(returns: pd.DataFrame) -> str:
+    """Describe the observation dates actually included in a correlation."""
+    if returns.empty:
+        return "No observations in the selected date range"
+    first, last = returns.index.min(), returns.index.max()
+    return f"{first.day}/{first:%b/%Y} - {last.day}/{last:%b/%Y}"
 
 
 def _filter_returns(

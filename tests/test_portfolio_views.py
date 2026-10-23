@@ -553,6 +553,27 @@ def test_performance_correlation_uses_compact_axis_labels(tmp_path):
     assert list(corr.index) == ["AAA", "BBB"]
 
 
+@pytest.mark.parametrize("method", ["return_correlation", "volatility_correlation"])
+@pytest.mark.parametrize(
+    "filters, subtitle",
+    [
+        ({}, "30/Dec/2025 - 4/Jan/2026"),
+        ({"year": 2026}, "1/Jan/2026 - 4/Jan/2026"),
+        ({"start": "2025-12-31", "end": "2026-01-02"}, "31/Dec/2025 - 2/Jan/2026"),
+        ({"year": 2026, "end": "2026-01-02"}, "1/Jan/2026 - 2/Jan/2026"),
+        ({"year": 2027}, "No observations in the selected date range"),
+    ],
+)
+def test_performance_correlation_subtitle_shows_used_observation_dates(tmp_path, method, filters, subtitle):
+    view = _two_asset_portfolio(tmp_path).performance_view(start="2025-12-29", end="2026-01-04")
+
+    rendered = repr(getattr(view, method)(**filters))
+
+    lines = rendered.splitlines()
+    assert method.replace("_", " ").upper() in lines[0]
+    assert subtitle in lines[1]
+
+
 def test_risk_view_exposes_current_and_yearly_risk_by_asset(tmp_path):
     portfolio = _two_asset_portfolio(tmp_path)
 

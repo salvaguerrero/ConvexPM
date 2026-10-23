@@ -178,12 +178,8 @@ def test_market_data_store_interactive_summary_and_lookup(tmp_path):
     assert list(repsol.stats(1, freq="Y").columns) == ["2026"]
     assert "2026-01" in repsol.stats(freq="M").columns
     assert repsol.prices.iloc[-1] == pytest.approx(12.0)
-    import matplotlib
-
-    matplotlib.use("Agg")
-    assert repsol.plot(show=False).get_title() == "REP price / NAV"
-    assert "REP price / NAV" in repr(repsol.plot_text(width=20, height=5))
-    assert "REP price / NAV" in repr(repsol.plot(style="terminal", width=20, height=5))
+    assert not hasattr(repsol, "plot")
+    assert not hasattr(repsol, "plot_text")
 
 
 def test_market_data_updater_can_force_backfill(tmp_path):

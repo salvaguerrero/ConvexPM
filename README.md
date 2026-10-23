@@ -28,6 +28,25 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Demo Notebook
+
+Open [scripts/explore_my_portfolio.ipynb](scripts/explore_my_portfolio.ipynb) for a
+demo portfolio with invented trades and Yahoo price history for real stocks,
+with saved outputs covering cash settlement, EUR/USD
+valuation, benchmark performance, attribution, correlations, and charts. It includes
+a reference cell for the APIs used in `scripts/explore_my_portfolio_2.py`.
+
+```bash
+pip install jupyterlab ipykernel
+jupyter lab scripts/explore_my_portfolio.ipynb
+```
+
+Select a kernel with ConvexPM installed and run all cells. The default demo uses
+Yahoo downloads and isolated temporary stores, so Run All requires internet access.
+Existing data files are never used. Tables use terminal formatting via `print()`;
+the dedicated ConvexPM charts render inline in a trusted Jupyter notebook.
+Broker imports are opt-in.
+
 ## Main Concepts
 
 ### `Instrument`
@@ -592,10 +611,8 @@ time; create a new chart if you want a different horizon or drawdown tolerance.
 For speed, portfolio charts value the portfolio only on actual market/trade
 observation dates instead of every calendar day.
 
-Legacy portfolio helpers such as `portfolio.stats`, `portfolio.plot_text()`,
-and `portfolio.plot(style="terminal")` have been removed. Use
-`portfolio.performance_view()` for portfolio metrics and `portfolio.chart()`
-for the interactive NAV chart.
+Use `instrument_plot()` for instrument charts and `portfolio.chart()` for
+portfolio charts. Use `portfolio.performance_view()` for portfolio metrics.
 
 ## Terminal Display
 

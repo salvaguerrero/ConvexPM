@@ -30,7 +30,7 @@ def terminal_title(title: str, subtitle: str | None = None) -> str:
 class StyledDataFrame(pd.DataFrame):
     """DataFrame with a blue terminal repr and ordinary pandas behavior."""
 
-    _metadata = ["_terminal_title", "_terminal_max_col_width", "_terminal_numeric_precision"]
+    _metadata = ["_terminal_title", "_terminal_subtitle", "_terminal_max_col_width", "_terminal_numeric_precision"]
 
     @property
     def _constructor(self):
@@ -45,6 +45,9 @@ class StyledDataFrame(pd.DataFrame):
         max_col_width = getattr(self, "_terminal_max_col_width", 32)
         numeric_precision = getattr(self, "_terminal_numeric_precision", 2)
         parts = [terminal_title(title)] if title else []
+        subtitle = getattr(self, "_terminal_subtitle", None)
+        if subtitle:
+            parts.append(f"{DIM}{CYAN}{subtitle}{RESET}")
         parts.append(
             blue_table(
                 pd.DataFrame(self),
@@ -90,12 +93,14 @@ def styled_dataframe(
     df: pd.DataFrame,
     title: str | None = None,
     *,
+    subtitle: str | None = None,
     max_col_width: int = 32,
     numeric_precision: int = 2,
 ) -> StyledDataFrame:
     """Return ``df`` with a styled terminal repr."""
     result = StyledDataFrame(df.copy())
     result._terminal_title = title
+    result._terminal_subtitle = subtitle
     result._terminal_max_col_width = max_col_width
     result._terminal_numeric_precision = numeric_precision
     return result
